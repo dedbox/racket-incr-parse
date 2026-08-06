@@ -8,6 +8,10 @@
 ;; eq?-identity of the Green node itself. Per-node-kind elaborators are
 ;; registered by each language module; grammar.rkt will emit these
 ;; registrations automatically.
+;;
+;; NOTE: ast-leaf-text holds a rope, not a plain string, per the real
+;; current-leaf-text-extractor default. Any downstream code comparing it
+;; against a string literal needs rope->string first.
 
 (require (prefix-in lex: incr-lex)
          racket/match

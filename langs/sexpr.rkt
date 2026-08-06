@@ -23,6 +23,7 @@
 
 (require (prefix-in : incr-lex)
          rope
+         "../private/ast.rkt"
          "../private/combinators.rkt"
          "../private/green.rkt"
          "../private/hole-ghost.rkt"
@@ -97,12 +98,29 @@
   (rep 'sexprs parse-sexpr program-stop?))
 
 ;;; --------------------------------------------------------------------------
+;;; AST
+;;; --------------------------------------------------------------------------
+
+;; ast-list holds already-elaborated elements, without the parens, since they
+;; carry no semantic content once the grouping is in the tree. ast-program is
+;; the top-level sequence of sexprs in a file.
+(struct ast-list (elements) #:transparent)
+(struct ast-program (sexprs) #:transparent)
+
+(define-elaborator list (branch)
+  (define elements (cadr (green-branch-children branch)))
+  (ast-list (map elaborate (green-branch-children elements))))
+
+(define-elaborator sexprs (branch)
+  (ast-program (map elaborate (green-branch-children branch))))
+
+;;; --------------------------------------------------------------------------
 ;;; Entry point
 ;;; --------------------------------------------------------------------------
 
-;; Non-incremental for now, per the agreed build order - lexes the
-;; whole string via a fresh incr-lex session, then parses the full
-;; token list in one pass.
+;; Non-incremental for now, per the agreed build order - lexes the whole
+;; string via a fresh incr-lex session, then parses the full token list in one
+;; pass.
 (define (parse-sexpr-string str)
   (define sess (:make-session sexpr-lex sexpr-apply-edit string-rope-ropeable str))
   (define toks (:session->tokens-list sess))
@@ -110,6 +128,9 @@
   (unless (eq? (peek-kind remaining) 'incr-lex:eof)
     (error 'parse-sexpr-string "parser did not consume the full token stream"))
   tree)
+
+(define (elaborate-sexpr-string str)
+  (elaborate (parse-sexpr-string str)))
 
 (module+ test
   (require racket/list
@@ -164,8 +185,6 @@
                         (green-branch-children elements)))
     (check-equal? kinds '(Symbol Number)))
 
-  (require racket/pretty)
-
   (test-case "incremental reparse: untouched subtree is eq? across an edit"
     (define sess1 (make-parse-session sexpr-lex sexpr-apply-edit string-rope-ropeable
                                       "(quux (bar 1 2) baz)")) ; was (foo ...) - collided with an earlier test-case's fixture
@@ -182,4 +201,22 @@
     (define baz1 (find-baz tree1))
     (define baz2 (find-baz tree2))
     (check-eq? baz1 baz2)
-    (parse-session-unload! sess2)))
+    (parse-session-unload! sess2))
+
+  (test-case "AST: nested list elaborates to nested ast-list, parens dropped"
+    (define ast (elaborate-sexpr-string "(foo (bar 1) baz)"))
+    (check-true (ast-program? ast))
+    (define top (car (ast-program-sexprs ast)))
+    (check-true (ast-list? top))
+    (define elems (ast-list-elements top))
+    (check-equal? (length elems) 3)
+    (check-true (ast-leaf? (car elems)))
+    (check-equal? (rope->string (ast-leaf-text (car elems))) "foo")
+    (check-true (ast-list? (cadr elems))))
+
+  (test-case "AST: a hole survives elaboration with its diagnostics intact"
+    (define ast (elaborate-sexpr-string ") stray"))
+    (define first (car (ast-program-sexprs ast)))
+    (check-true (ast-hole? first))
+    (check-true (ast-hole-staged? first))
+    (check-equal? (length (ast-hole-diagnostics first)) 1)))

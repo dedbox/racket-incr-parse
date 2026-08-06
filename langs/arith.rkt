@@ -16,6 +16,7 @@
 
 (require (prefix-in : incr-lex)
          rope
+         "../private/ast.rkt"
          "../private/combinators.rkt"
          "../private/green.rkt"
          "../private/hole-ghost.rkt"
@@ -88,6 +89,34 @@
   (rep 'program (λ (toks) (parse-expr toks 0)) program-stop?))
 
 ;;; --------------------------------------------------------------------------
+;;; AST
+;;; --------------------------------------------------------------------------
+
+;; op is the operator's own lexer-level kind, e.g. 'Plus, read back off its
+;; leaf after elaboration.
+(struct ast-binop (op left right) #:transparent)
+(struct ast-unop (op operand) #:transparent)
+(struct ast-program (exprs) #:transparent)
+
+(define-elaborator unop (branch)
+  (define children (green-branch-children branch))
+  (define op (ast-leaf-kind (elaborate (car children))))
+  (ast-unop op (elaborate (cadr children))))
+
+(define-elaborator binop (branch)
+  (define children (green-branch-children branch))
+  (define op (ast-leaf-kind (elaborate (cadr children))))
+  (ast-binop op (elaborate (car children)) (elaborate (caddr children))))
+
+;; Parens carry no meaning once the tree shape encodes grouping, so
+;; elaboration skips straight to the wrapped expression.
+(define-elaborator paren (branch)
+  (elaborate (cadr (green-branch-children branch))))
+
+(define-elaborator program (branch)
+  (ast-program (map elaborate (green-branch-children branch))))
+
+;;; --------------------------------------------------------------------------
 ;;; Entry Point
 ;;; --------------------------------------------------------------------------
 
@@ -102,6 +131,9 @@
   (unless (eq? (peek-kind remaining) 'incr-lex:eof)
     (error 'parse-arith-string "parser did not consume the full token stream"))
   tree)
+
+(define (elaborate-arith-string str)
+  (elaborate (parse-arith-string str)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Tests
@@ -157,7 +189,22 @@
     (define expr (top1 (parse-arith-string "(1 + 2")))
     (define last-child (last (green-branch-children expr)))
     (check-true (ghost? last-child))
-    (check-eq? (ghost-of last-child) 'RParen)))
+    (check-eq? (ghost-of last-child) 'RParen))
+
+  (test-case "AST: precedence carries through elaboration"
+    (define ast (elaborate-arith-string "1+2*3"))
+    (define expr (car (ast-program-exprs ast)))
+    (check-true (ast-binop? expr))
+    (check-eq? (ast-binop-op expr) 'Plus)
+    (check-true (ast-leaf? (ast-binop-left expr)))
+    (check-true (ast-binop? (ast-binop-right expr))))
+
+  (test-case "AST: parens are dropped, unop keeps its operator kind"
+    (define ast (elaborate-arith-string "-(1+2)"))
+    (define expr (car (ast-program-exprs ast)))
+    (check-true (ast-unop? expr))
+    (check-eq? (ast-unop-op expr) 'Minus)
+    (check-true (ast-binop? (ast-unop-operand expr)))))
 
 (module+ main
   (for ([src (list "1 + 2 * 3"
