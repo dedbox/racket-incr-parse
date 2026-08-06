@@ -199,7 +199,7 @@
     (define-values (tree rest)
       (parse-program (toks 'LParen "(" 'Symbol "foo" 'Number "1" 'RParen ")")))
     (check-eq? (peek-kind rest) 'incr-lex:eof)
-    (check-eq? (green-tree-kind tree) 'program)
+    (check-eq? (green-tree-kind tree) 'sexprs)
     (define top (car (green-branch-children tree)))
     (check-eq? (green-tree-kind top) 'list)
     (define elements (cadr (green-branch-children top)))
