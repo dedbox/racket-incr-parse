@@ -11,9 +11,7 @@
 ;; Identical branches collapse to the same object via `intern-branch`, so
 ;; `eq?` is a valid, O(1) structural equality test on interned Green nodes.
 
-(require incr-lex
-         racket/contract
-         racket/match)
+(require incr-lex)
 
 (provide (all-defined-out))
 

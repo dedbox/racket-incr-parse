@@ -9,8 +9,7 @@
 ;; every missing syntactically required piece is a ghost, and every
 ;; syntactically-invalid region is hoisted into a hole.
 
-(require racket/contract
-         "green.rkt"
+(require "green.rkt"
          "span.rkt")
 
 (provide (all-defined-out))
