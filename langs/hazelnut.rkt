@@ -64,34 +64,37 @@
 
 (:define-tokens hazelnut-tokens
   ;; Trivia
-  [Whitespace := (+ :ws)]
-  [Newline    := :nl]
+  [Whitespace   := (+ :ws)]
+  [Newline      := :nl]
   ;; Types
-  [NumT       := "ℕ"]
-  [BoolT      := "𝔹"]
-  [Arrow      := "→"]
+  [NumT         := "ℕ"]
+  [BoolT        := "𝔹"]
+  [Arrow        := "→"]
   ;; Expressions
-  [Fun        := "λ"]
-  [Dot        := "."]
-  [Colon      := ":"]
-  [Let        := "let"]
-  [Eq         := "="]
-  [In         := "in"]
-  [Question   := "?"]
-  [True       := "𝕥"]
-  [False      := "𝕗"]
-  [Keyword    := (or Let In)]
+  [Fun          := "λ"]
+  [Dot          := "."]
+  [Colon        := ":"]
+  [Let          := "let"]
+  [Eq           := "="]
+  [In           := "in"]
+  [Question     := "?"]
+  [True         := "𝕥"]
+  [False        := "𝕗"]
+  [Keyword      := (or Let In)]
+  [GlyphKeyword := (or Fun NumT BoolT True False)]
   ;; Shared
-  [LParen     := "("]
-  [RParen     := ")"]
-  [Plus       := "+"]
-  [Minus      := "-"]
-  [Star       := "*"]
-  [Slash      := "/"]
-  [Lt         := "<"]
-  [EqEq       := "≡"]
-  [Number     := (+ :digit)]
-  [Ident      := (and (seq :alpha (* :alnum)) (not Keyword))])
+  [LParen       := "("]
+  [RParen       := ")"]
+  [Plus         := "+"]
+  [Minus        := "-"]
+  [Star         := "*"]
+  [Slash        := "/"]
+  [Lt           := "<"]
+  [EqEq         := "≡"]
+  [Number       := (+ :digit)]
+  [Ident        := (and (seq :alpha (* :alnum))
+                        (not Keyword)
+                        (not-containing GlyphKeyword))])
 
 ;; => defines hazelnut-lex and hazelnut-apply-edit
 (:define-lexer hazelnut
@@ -146,7 +149,7 @@
        (expect 'Dot)
        (λ (toks) (parse-expr toks 0))))
 
-;; "≔" Ident "=" Expr "▸" Expr
+;; "let" Ident "=" Expr "in" Expr
 (define nud-let
   (seq 'let
        (expect 'Let)
@@ -161,11 +164,11 @@
 ;; three-part, two-delimiter shape. Right-associative, lowest precedence -
 ;; see TERNARY-BP below.
 (define (led-ternary left toks)
-  (define-values (_q toks1) (consume-as 'Question toks))
+  (define-values (q toks1) (consume-as 'Question toks))
   (define-values (then-branch toks2) (parse-expr toks1 0))
-  (define-values (_c toks3) ((expect 'Colon) toks2))
+  (define-values (c toks3) ((expect 'Colon) toks2))
   (define-values (else-branch toks4) (parse-expr toks3 TERNARY-RBP))
-  (values (intern-branch! 'ternary (list left then-branch else-branch)) toks4))
+  (values (intern-branch! 'ternary (list left q then-branch c else-branch)) toks4))
 
 ;; Application by juxtaposition - no operator token at all, the "operator"
 ;; is simply another atom-shaped expression appearing right after a
@@ -289,8 +292,6 @@
 ;;; Entry Point
 ;;; --------------------------------------------------------------------------
 
-(require racket/pretty)
-
 (define (parse-hazelnut-string str)
   (define sess (:make-session hazelnut-lex hazelnut-apply-edit string-rope-ropeable str))
   (define toks (tokens->stream (:session->tokens-list sess)))
@@ -300,7 +301,6 @@
                    [current-bp-table  expr-bp-table]
                    [current-expr-rule-id 'expr])
       (parse-expr toks 0)))
-  (pretty-write `([TREE ,tree] [REMAINING ,remaining]))
   (unless (eq? (peek-kind remaining) 'incr-lex:eof)
     (error 'parse-hazelnut-string "parser did not consume the full token stream"))
   tree)
@@ -361,7 +361,8 @@
   (test-case "ternary is right-associative: a ? b : c ? d : e is a ? b : (c ? d : e)"
     (define tree (parse-hazelnut-string "1 < 2 ? 3 : 4 < 5 ? 6 : 7"))
     (check-eq? (green-tree-kind tree) 'ternary)
-    (define-values (test then else) (apply values (green-branch-children tree)))
+    (define-values (test _q then _c else) (apply values (green-branch-children tree)))
+    (check-eq? (green-tree-kind test) 'binop)
     (check-eq? (green-tree-kind then) 'num)
     (check-eq? (green-tree-kind else) 'ternary))
 
@@ -411,9 +412,7 @@
     (define p2 (find-plus-2 tree2))
     (check-not-false p1)
     (check-eq? p1 p2)
-    (parse-session-unload! sess2))
-
-  )
+    (parse-session-unload! sess2)))
 
 (module+ main
   (for ([src (list "λf:ℕ→ℕ.λx:ℕ.f (f x)"
