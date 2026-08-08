@@ -91,20 +91,35 @@
     [(or (not cache) (zero? (vector-length (token-stream-vec toks)))) (thunk)]
     [else
      (define token (stream-peek toks))
+     (define start (current-offset))
+     ;; The starting offset is folded into the key itself, not just
+     ;; extra-key.
+     ;;
+     ;; A leading token's eq?-identity does not imply a unique document
+     ;; position. incr-lex content-interns tokens process-wide, so two
+     ;; unrelated occurrences of identical text plus identical trivia become
+     ;; the same token object. Without keying on offsetd, two call sites that
+     ;; happen to share that one token object would alias onto the same cache
+     ;; slot and one would silently return the other's tree, regardless of
+     ;; what actually follows at either site. This showed up for real the
+     ;; first time a grammar's test fixture had two structurally-identical
+     ;; leaves in it. Keying on offset makes the collision structurally
+     ;; impossible, so it doesn't need to be detected and recovered from after
+     ;; the fact.
+     (define key (cons extra-key start))
      (define by-token (hash-ref! (parse-cache-table cache) rule-id make-hasheq))
      (define by-key   (hash-ref! by-token token make-hash))
      (cond
-       [(hash-ref by-key extra-key #f)
+       [(hash-ref by-key key #f)
         => (λ (entry)
              (bump-parse-offset! (cache-entry-width entry))
              (values (cache-entry-tree entry)
                      (stream-advance toks (cache-entry-ntoks entry))))]
        [else
-        (define start (current-offset))
         (define-values (tree rest) (thunk))
         (define width (green-tree-width tree))
-        (hash-set! by-key extra-key (cache-entry tree (stream-delta toks rest) start width))
-        (bucket-index-add! cache (entry-ref rule-id token extra-key start (+ start width)))
+        (hash-set! by-key key (cache-entry tree (stream-delta toks rest) start width))
+        (bucket-index-add! cache (entry-ref rule-id token key start (+ start width)))
         (values tree rest)])]))
 
 ;; Convenience wrapper for ordinary (listof token?) -> (values ...) rules
@@ -436,4 +451,19 @@
     (test-case "the changed leaf and every ancestor whose span contained it are rebuilt, not reused"
       (check-not-eq? (find-atom tree1 T-one) (find-atom tree2 T-one*)) ; different objects by construction
       (check-false (find-atom tree2 T-one)) ; old object doesn't even appear
-      (check-not-eq? tree1 tree2)))) ; outer 'list rebuilt too
+      (check-not-eq? tree1 tree2))) ; outer 'list rebuilt too
+
+  (test-case "two eq? tokens at DIFFERENT offsets must not alias onto the same cache slot"
+    ;; A single token object standing in for two unrelated occurrences of
+    ;; identical text plus identical trivia. Without the offset folded into
+    ;; the cache key, the second call below would incorrectly hit the first's
+    ;; entry and return 'first instead of parsing 'second.
+    (define shared-tok (mk-tok 'K "x"))
+    (define (run label)
+      (memoize 'r (λ (toks) (values (green-token 'k 1 label) toks))))
+    (define cache (make-parse-cache))
+    (parameterize ([current-parse-cache cache] [current-parse-offset (box 0)])
+      ((run 'first) (tokens->stream (list shared-tok))))
+    (parameterize ([current-parse-cache cache] [current-parse-offset (box 100)])
+      (define-values (tree _rest) ((run 'second) (tokens->stream (list shared-tok))))
+      (check-eq? (green-token-token tree) 'second))))
