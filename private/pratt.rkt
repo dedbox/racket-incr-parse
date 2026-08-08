@@ -54,8 +54,14 @@
 ;;; The Climb
 ;;; --------------------------------------------------------------------------
 
+;; The rule-id parse-expr will memoize under. This is a parameter so a
+;; multi-sort grammar can reuse this engine for a second,
+;; independently-memoized sort just by parameterizing this alongside the three
+;; table parameters above. Defaults to 'expr.
+(define current-expr-rule-id (make-parameter 'expr))
+
 (define (parse-expr toks min-bp)
-  (memo-ref! 'expr toks min-bp (λ () (parse-expr* toks min-bp))))
+  (memo-ref! (current-expr-rule-id) toks min-bp (λ () (parse-expr* toks min-bp))))
 
 (define (parse-expr* toks min-bp)
   (define-values (left toks1) (parse-nud toks))
@@ -91,16 +97,22 @@
 
 ;; Ordinary binary infix operator.
 ;;
-;; Consume the operator token itself (wrapped as a green-token of its own
-;; kind), parse the right operand at the operator's own right binding power,
-;; combine into a single 'binop branch: (binop left <op-token> right). Its
-;; specific operator stays recoverable from the middle child's green-tree-kind
-;; - same pattern used for 'atom in langs/sexpr.rkt.
-(define ((led-infix op-kind) left toks)
+;; Consumes the operator token itself, wrapped as a green-token of its own
+;; kind, then parses the right operand at the operator's right binding power
+;; and combines them into a single 'binop branch: (binop left <op-token>
+;; right). Its operator is recoverable from the middle child's
+;; green-tree-kind.
+;;
+;; A grammar with a second sort sharing this same engine should give that
+;; sort's infix operators a distinct kind here. ast.rkt's elaborator registry
+;; is one shared table keyed by symbol, so two unrelated operators both
+;; producing plain 'binop would silently collide on whichever elaborator was
+;; registered last.
+(define ((led-infix op-kind #:kind [kind 'binop]) left toks)
   (define-values (op-leaf toks1) (consume-as op-kind toks))
   (define rbp (cdr (hash-ref (current-bp-table) op-kind)))
   (define-values (right toks2) (parse-expr toks1 rbp))
-  (values (intern-branch! 'binop (list left op-leaf right)) toks2))
+  (values (intern-branch! kind (list left op-leaf right)) toks2))
 
 ;; Prefix unary operator.
 ;;
