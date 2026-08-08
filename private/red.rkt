@@ -165,7 +165,7 @@
            rope)
 
   (define (mk-tok kind str)
-    (lex:token kind (string-length str) (string->rope str) '() '() '()))
+    (lex:token kind (string-length str) (string->rope str) null null null))
 
   ;; Hand-built tree: (branch 'list [tokA "foo", ghost 'RParen])
   (define tokA (green-token 'atom 3 (mk-tok 'Symbol "foo")))
@@ -204,7 +204,7 @@
 
   (test-case "red-node-payload-offset accounts for leading trivia"
     (define triv (lex:trivia 'Whitespace (string->rope "  ")))
-    (define tok  (lex:token 'Symbol 5 (string->rope "hi") (list triv) '() '()))
+    (define tok  (lex:token 'Symbol 5 (string->rope "hi") (list triv) null null))
     (define leaf (green-token 'atom 5 tok))
     (define r    (red-node leaf 10 #f))
     ;; 10 (this leaf's own red offset) + 2 (leading trivia width) = 12

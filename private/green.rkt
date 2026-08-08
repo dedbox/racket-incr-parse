@@ -62,4 +62,4 @@
     (check-equal? (green-tree-width (intern-branch! 'pair (list l1 l2))) 8))
 
   (test-case "empty branch has width 0"
-    (check-equal? (green-tree-width (intern-branch! 'empty '())) 0)))
+    (check-equal? (green-tree-width (intern-branch! 'empty null)) 0)))

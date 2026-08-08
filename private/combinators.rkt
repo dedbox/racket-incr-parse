@@ -4,22 +4,26 @@
 ;;
 ;; The no-fail combinator core.
 ;;
-;;   Parser ≡ (listof token?) → (values green-tree? (listof token?))
+;;   Parser ≡ token-stream? → (values green-tree? token-stream?)
 ;;
-;; Every combinator in this file returns a COMPLETE green-tree: an ordinary
-;; token/branch on success, a hole or a ghost on failure to match. If
-;; something can't be parsed as intended, that fact is recorded IN the tree (a
-;; hole, with diagnostics).
+;; toks is a token-stream value (a vector + integer position),
+;; not a raw list, but every combinator here still treats it opaquely.
 ;;
-;; The one exception is try/alt's internal backtracking (below), which uses a
-;; private exception purely for non-local control flow between alternatives
-;; that haven't committed yet.
+;; Every combinator in this file returns a complete green-tree: either an
+;; ordinary token/branch on success, or a hole or a ghost on failure to match.
+;; If something can't be parsed as intended, that fact is recorded in the tree
+;; as a hole with diagnostics.
+;;
+;; The one exception is try/alt's internal backtracking, which uses a private
+;; exception purely for non-local control flow between alternatives that
+;; haven't committed yet.
 
 (require (prefix-in lex: incr-lex)
          "green.rkt"
          "hole-ghost.rkt"
          "memo.rkt"
-         "span.rkt")
+         "span.rkt"
+         "token-stream.rkt")
 
 (provide (all-defined-out))
 
@@ -27,8 +31,13 @@
 ;;; Token-stream primitives
 ;;; --------------------------------------------------------------------------
 
-(define (peek-kind toks)
-  (if (null? toks) 'incr-lex:eof (lex:token-kind (car toks))))
+(define (peek-kind toks) (stream-peek-kind toks))
+
+;; The kind of token just past the current one. This is a second
+;; combinator-level primitive alongside peek-kind for a grammar that needs
+;; exactly one extra token of lookahead to disambiguate two productions
+;; without requiring try/alt.
+(define (peek2-kind toks) (stream-peek-kind (stream-rest toks)))
 
 (define (at-eof? toks) (eq? (peek-kind toks) 'incr-lex:eof))
 
@@ -45,11 +54,11 @@
 ;; wrapped token's own lex:token-kind, e.g., for an AST elaboration pass to
 ;; split back out.
 (define (consume-as kind toks)
-  (when (null? toks)
+  (when (zero? (vector-length (token-stream-vec toks)))
     (error 'consume-as "no tokens left (missing EOF sentinel?)"))
-  (define tok (car toks))
+  (define tok (stream-peek toks))
   (bump-parse-offset! (lex:token-width tok))
-  (values (make-green-token kind tok) (cdr toks)))
+  (values (make-green-token kind tok) (stream-rest toks)))
 
 ;; If the next token matches, consume it. If not, DON'T consume anything and
 ;; DON'T fail - insert a ghost standing in for the missing token instead.
@@ -102,7 +111,7 @@
   (unless (stop? 'incr-lex:eof)
     (error 'rep "stop? must return #t for 'incr-lex:eof"))
   (λ (toks)
-    (let loop ([toks toks] [children '()])
+    (let loop ([toks toks] [children null])
       (if (stop? (peek-kind toks))
           (values (intern-branch! kind (reverse children)) toks)
           (let-values ([(child toks*) (elem-parser toks)])
@@ -115,9 +124,16 @@
 (struct backtrack-signal ())
 (define (fail) (raise (backtrack-signal)))
 
-;; Runs p. If it fails, returns #f instead of propagating the error.
+;; Runs p. If it fails, returns #f instead of propagating the error, and
+;; rolls current-parse-offset back to where it was before.
+;;
+;; The current-parse-offset rollback is necessary because partial matches
+;; inside p can affect the offset on their way through, causing the memo layer
+;; to see a document position that doesn't match the returned tree.
 (define (try p toks)
-  (with-handlers ([backtrack-signal? (λ (_) #f)])
+  (define saved-offset (unbox (current-parse-offset)))
+  (with-handlers ([backtrack-signal?
+                   (λ (_) (set-box! (current-parse-offset) saved-offset) #f)])
     (call-with-values (λ () (p toks)) cons)))
 
 ;; Tries each parser in order via try. The first that doesn't fail wins. If
@@ -133,18 +149,18 @@
   (require rackunit
            rope)
 
-  ;; Hand-built tokens, bypassing any real lexer, for testing the combinator
-  ;; layer in isolation. EOF-KIND matches what peek-kind/at-eof? treat the
-  ;; empty list as, so an explicit EOF token isn't strictly required in these
-  ;; fake streams, but including one keeps the fixture closer to real incr-lex
-  ;; output.
+  ;; Manually constructed tokens, bypassing any real lexer, for testing the
+  ;; combinator layer in isolation. Every fixture still ends with an explicit
+  ;; EOF token, matching real incr-lex output, even though nothing here relies
+  ;; on that specifically anymore.
   (define (mk-tok kind str)
-    (lex:token kind (string-length str) (string->rope str) '() '() '()))
+    (lex:token kind (string-length str) (string->rope str) null null null))
   (define (toks . pairs)
     ;; pairs alternate kind str kind str ...
-    (let loop ([ps pairs])
-      (if (null? ps) (list (mk-tok 'incr-lex:eof ""))
-          (cons (mk-tok (car ps) (cadr ps)) (loop (cddr ps))))))
+    (tokens->stream
+     (let loop ([ps pairs])
+       (if (null? ps) (list (mk-tok 'incr-lex:eof ""))
+           (cons (mk-tok (car ps) (cadr ps)) (loop (cddr ps)))))))
 
   (test-case "consume-as wraps one token, advances the stream"
     (define-values (leaf rest) (consume-as 'atom (toks 'Symbol "x")))

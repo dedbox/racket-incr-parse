@@ -74,7 +74,7 @@
 
   (test-case "diagnostics default to empty, attach when given"
     (define h1 (make-empty-hole))
-    (check-equal? (hole-diagnostics h1) '())
+    (check-equal? (hole-diagnostics h1) null)
     (define d (diagnostic 'error "oops" (span 0 0)))
     (define h2 (make-empty-hole #:diagnostics (list d)))
     (check-equal? (hole-diagnostics h2) (list d)))

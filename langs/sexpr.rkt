@@ -28,7 +28,8 @@
          "../private/green.rkt"
          "../private/hole-ghost.rkt"
          "../private/memo.rkt"
-         "../private/printer.rkt")
+         "../private/printer.rkt"
+         "../private/token-stream.rkt")
 
 (provide (all-defined-out))
 
@@ -123,7 +124,7 @@
 ;; pass.
 (define (parse-sexpr-string str)
   (define sess (:make-session sexpr-lex sexpr-apply-edit string-rope-ropeable str))
-  (define toks (:session->tokens-list sess))
+  (define toks (tokens->stream (:session->tokens-list sess)))
   (define-values (tree remaining) (parse-program toks))
   (unless (eq? (peek-kind remaining) 'incr-lex:eof)
     (error 'parse-sexpr-string "parser did not consume the full token stream"))

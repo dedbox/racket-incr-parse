@@ -21,7 +21,8 @@
          "../private/green.rkt"
          "../private/hole-ghost.rkt"
          "../private/pratt.rkt"
-         "../private/printer.rkt")
+         "../private/printer.rkt"
+         "../private/token-stream.rkt")
 
 (provide (all-defined-out))
 
@@ -122,7 +123,7 @@
 
 (define (parse-arith-string str)
   (define sess (:make-session arith-lex arith-apply-edit string-rope-ropeable str))
-  (define toks (:session->tokens-list sess))
+  (define toks (tokens->stream (:session->tokens-list sess)))
   (define-values (tree remaining)
     (parameterize ([current-nud-table arith-nud-table]
                    [current-led-table arith-led-table]

@@ -128,16 +128,18 @@
   (require (prefix-in lex: incr-lex)
            rackunit
            rope
-           "hole-ghost.rkt")
+           "hole-ghost.rkt"
+           "token-stream.rkt")
 
   ;; Synthetic single-purpose token kinds, decoupled from any real grammar
   ;; (same isolation approach as combinators.rkt's tests).
   (define (mk-tok kind str)
     (lex:token kind (string-length str) (string->rope str) null null null))
   (define (toks . pairs)
-    (let loop ([ps pairs])
-      (if (null? ps) (list (mk-tok 'incr-lex:eof ""))
-          (cons (mk-tok (car ps) (cadr ps)) (loop (cddr ps))))))
+    (tokens->stream
+     (let loop ([ps pairs])
+       (if (null? ps) (list (mk-tok 'incr-lex:eof ""))
+           (cons (mk-tok (car ps) (cadr ps)) (loop (cddr ps)))))))
 
   (define test-nud (hash 'NUM (λ (t) (consume-as 'atom t))))
   (define test-led (hash 'PLUS (led-infix 'PLUS) 'STAR (led-infix 'STAR)))

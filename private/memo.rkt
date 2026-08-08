@@ -6,7 +6,7 @@
 ;; started at PLUS explicit, offset-based invalidation on edit.
 ;;
 ;; Identity alone isn't enough. A composite rule's cache entry can have an
-;; unchanged LEADING token while an edit lands strictly inside its own
+;; unchanged LEADING token while an edit lies strictly inside its own
 ;; consumed span. A surviving token deep in the prefix says nothing about what
 ;; happened later inside the rule that started there. Therefore, every cache
 ;; entry also records its absolute [offset, offset+width) span, and every edit
@@ -16,19 +16,22 @@
 ;; The offset itself is tracked via a dynamically-scoped, explicitly mutated
 ;; box (current-parse-offset), advanced at the ONE place any token is actually
 ;; consumed (consume-as, in combinators.rkt). This is NOT part of any Green
-;; node - those stay position-free - it is transient parse-time bookkeeping
+;; node - those stay position-free. It is transient parse-time bookkeeping
 ;; that exists purely so cache entries know where they came from.
 ;;
-;; Additionally, a cache entry must never store or return a captured
-;; token-list continuation. A hit for an entry whose OWN span is untouched can
-;; still immediately precede tokens an edit DID replace. If the entry hands
-;; back its old `rest` list, the edit has alread superceded that stale list's
-;; head token. Instead, cache a token COUNT (ntoks) and always derive `rest`
-;; via (list-tail toks ntoks) against the tokens passed into THIS call (which
-;; will never be stale).
+;; A cache entry never stores or returns a captured token-stream continuation.
+;; A hit for an entry whose span is untouched can still immediately precede
+;; tokens an edit replaced. If the entry returned its old `rest` stream, the
+;; edit is lost. Instead, a hit caches a token count (ntoks) and always
+;; derives `rest` via (stream-advance toks ntoks) against the stream passed
+;; into the current call, which will never be stale. Since toks is a
+;; token-stream (see token-stream.rkt), stream-advance is an O(1) index
+;; update.
 
 (require (prefix-in lex: incr-lex)
-         "green.rkt")
+         racket/list
+         "green.rkt"
+         "token-stream.rkt")
 
 (provide (all-defined-out))
 
@@ -42,15 +45,17 @@
 ;; offset/width : this entry's absolute document span, for invalidation
 (struct cache-entry (tree ntoks offset width) #:transparent)
 
-;; table : rule-id -> (hasheq token -> (hash extra-key -> (cons tree remaining-toks)))
+;; table : rule-id -> (hasheq token -> (hash extra-key -> cache-entry))
+;; spans : bucket-index -> (listof entry-ref) - see "Span-Based
+;;         Invalidation" below for details.
 ;;
-;; Three levels because a single Racket hash needs one uniform equivalence:
-;; the middle level MUST be eq?-keyed. extra-key (e.g. Pratt's min-bp) is
-;; small immutable data - a number or null - so equal?-keying it at the
+;; table has three levels because each Racket hash needs one uniform
+;; equivalence. The middle level must be eq?-keyed. extra-key (e.g. Pratt's
+;; min-bp) must be small immutable data to ensure equal?-keying it at the
 ;; innermost level is safe.
-(struct parse-cache (table) #:transparent)
+(struct parse-cache (table spans) #:transparent)
 
-(define (make-parse-cache) (parse-cache (make-hash)))
+(define (make-parse-cache) (parse-cache (make-hash) (make-hash)))
 
 ;; #f = memoization disabled. Every wrapped parser degrades to a pure
 ;; passthrough when this is unset.
@@ -76,56 +81,31 @@
 ;;; Low-Level Primitive
 ;;;
 ;;; Exposed directly (not just via `memoize` below) for rules whose Parser
-;;; shape doesn't fit a plain single-argument (listof token?) wrapper - e.g.
+;;; shape doesn't fit a plain single-argument token-stream? wrapper - e.g.
 ;;; Pratt's parse-expr, which is additionally keyed on min-bp.
 ;;; --------------------------------------------------------------------------
-
-;; `rest` is always a tail of `toks`.
-(define (count-consumed toks rest)
-  (let loop ([t toks] [n 0])
-    (if (eq? t rest) n (loop (cdr t) (add1 n)))))
 
 (define (memo-ref! rule-id toks extra-key thunk)
   (define cache (current-parse-cache))
   (cond
-    [(or (not cache) (null? toks)) (thunk)]
+    [(or (not cache) (zero? (vector-length (token-stream-vec toks)))) (thunk)]
     [else
-     (define token (car toks))
+     (define token (stream-peek toks))
      (define by-token (hash-ref! (parse-cache-table cache) rule-id make-hasheq))
      (define by-key   (hash-ref! by-token token make-hash))
      (cond
        [(hash-ref by-key extra-key #f)
         => (λ (entry)
              (bump-parse-offset! (cache-entry-width entry))
-             (values (cache-entry-tree entry) (list-tail toks (cache-entry-ntoks entry))))]
+             (values (cache-entry-tree entry)
+                     (stream-advance toks (cache-entry-ntoks entry))))]
        [else
         (define start (current-offset))
         (define-values (tree rest) (thunk))
-        (hash-set! by-key extra-key
-                   (cache-entry tree (count-consumed toks rest) start (green-tree-width tree)))
+        (define width (green-tree-width tree))
+        (hash-set! by-key extra-key (cache-entry tree (stream-delta toks rest) start width))
+        (bucket-index-add! cache (entry-ref rule-id token extra-key start (+ start width)))
         (values tree rest)])]))
-
-;; (define (memo-ref! rule-id toks extra-key thunk)
-;;   (define cache (current-parse-cache))
-;;   (cond
-;;     [(or (not cache) (null? toks)) (thunk)]
-;;     [else
-;;      (define token (car toks))
-;;      (define by-token (hash-ref! (parse-cache-table cache) rule-id make-hasheq))
-;;      (define by-key   (hash-ref! by-token token make-hash))
-;;      (cond
-;;        [(hash-ref by-key extra-key #f)
-;;         => (λ (entry)
-;;              (bump-parse-offset! (cache-entry-width entry))
-;;              (values (cache-entry-tree entry)
-;;                      (list-tail toks (cache-entry-ntoks entry))))]
-;;        [else
-;;         (define start (current-offset))
-;;         (define-values (tree rest) (thunk))
-;;         (hash-set! by-key extra-key
-;;                    (cache-entry tree (count-consumed toks rest) start
-;;                                 (green-tree-width tree)))
-;;         (values tree rest)])]))
 
 ;; Convenience wrapper for ordinary (listof token?) -> (values ...) rules
 (define ((memoize rule-id parser #:extra-key [extra-key-fn (λ (toks) null)]) toks)
@@ -135,33 +115,64 @@
 ;;; Span-Based Invalidation
 ;;; --------------------------------------------------------------------------
 
+;; A bucket/grid index over cache-entry spans, so an edit's eviction sweep
+;; only ever looks at entries whose span falls near the damage range, instead
+;; of walking the entire cache. This is NOT a general interval tree A real
+;; interval tree is still the more complete fix if profiling ever shows this
+;; insufficient.
+
 (define (span-overlaps? a-start a-end b-start b-end)
   (and (< a-start b-end) (< b-start a-end)))
 
-;; Eagerly evicts every entry, across every rule, whose recorded span
-;; overlaps [damage-start, damage-end).
+;; A bucket should be wide enough that most rule spans live in one or two
+;; buckets, and narrow enough that a damage range only ever touches a handful
+;; of buckets even in a large document. Tune this once there's a real corpus
+;; to benchmark against - see the caveat below.
+(define BUCKET-WIDTH 256)
+
+(define (bucket-of offset) (quotient offset BUCKET-WIDTH))
+
+;; The self-contained record stored in a bucket - self-contained so
+;; eviction never needs a second lookup into `table` just to find out
+;; which OTHER buckets the same entry is registered under.
+(struct entry-ref (rule-id token key start end) #:transparent)
+
+;; A zero-width entry needs to go into the bucket containing its own point,
+;; not zero buckets.
+(define (bucket-range start end)
+  (in-range (bucket-of start) (add1 (bucket-of (max start (sub1 end))))))
+
+(define (bucket-index-add! cache er)
+  (for ([b (bucket-range (entry-ref-start er) (entry-ref-end er))])
+    (hash-update! (parse-cache-spans cache) b (λ (l) (cons er l)) null)))
+
+(define (bucket-index-remove! cache er)
+  (for ([b (bucket-range (entry-ref-start er) (entry-ref-end er))])
+    (hash-update! (parse-cache-spans cache) b (λ (l) (remove er l eq?)) null)))
+
+;; Evicts every entry, across every rule, whose recorded span overlaps
+;; [damage-start, damage-end). Entries with no overlap are untouched.
 ;;
-;; O(cache size) - a linear sweep over every currently-memoized entry, per
-;; edit.
-;;
-;; Correct, but not yet optimal: a document with a large, long-lived cache and
-;; frequent edits would benefit from indexing entries by offset (e.g. an
-;; interval structure) to make this sublinear. Deferring that exactly like
-;; reparse-splicing was deferred earlier.
+;; Complexity: O(buckets touched by the damage range + entries registered in
+;; them). This is an improvement over a full linear sweep, but it is NOT a
+;; worst-case guarantee. A rule spanning most of the document would still
+;; register itself across many buckets and show up in most queries. It's good
+;; enough for a first pass, but should be revisited with a real interval
+;; structure if it ever becomes a bottleneck.
 (define (parse-cache-invalidate! cache damage-start damage-end)
-  (define stale
-    (for*/list ([(rule-id by-token) (in-hash (parse-cache-table cache))]
-                [(token by-key)     (in-hash by-token)]
-                [(key entry)        (in-hash by-key)]
-                #:when (span-overlaps? (cache-entry-offset entry)
-                                       (+ (cache-entry-offset entry)
-                                          (cache-entry-width entry))
-                                       damage-start damage-end))
-      (list rule-id token key)))
-  (for ([e (in-list stale)])
-    (define by-token (hash-ref (parse-cache-table cache) (car e)))
-    (define by-key   (hash-ref by-token (cadr e)))
-    (hash-remove! by-key (caddr e))))
+  (define candidates
+    (remove-duplicates
+     (append* (for/list ([b (bucket-range damage-start damage-end)])
+                (hash-ref (parse-cache-spans cache) b null)))
+     eq?))
+  (for ([er (in-list candidates)]
+        #:when (span-overlaps? (entry-ref-start er) (entry-ref-end er)
+                                damage-start damage-end))
+    (define by-token (hash-ref (parse-cache-table cache) (entry-ref-rule-id er) #f))
+    (when by-token
+      (define by-key (hash-ref by-token (entry-ref-token er) #f))
+      (when by-key (hash-remove! by-key (entry-ref-key er))))
+    (bucket-index-remove! cache er)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Session - one document's lex state plus its own private cache.
@@ -185,7 +196,7 @@
 (define (parse-session-run sess parse-entry)
   (parameterize ([current-parse-cache (parse-session-cache sess)]
                  [current-parse-offset (box 0)])
-    (define-values (tree rest) (parse-entry (parse-session-tokens sess)))
+    (define-values (tree rest) (parse-entry (tokens->stream (parse-session-tokens sess))))
     tree))
 
 ;; Applies a text edit via incr-lex's own session-edit and returns a NEW
@@ -203,6 +214,7 @@
 ;; Drops this session's entries immediately rather than waiting on GC.
 (define (parse-session-unload! sess)
   (hash-clear! (parse-cache-table (parse-session-cache sess)))
+  (hash-clear! (parse-cache-spans (parse-session-cache sess)))
   (void))
 
 (module+ test
@@ -228,8 +240,8 @@
                             (values (green-token 'k 1 'x) toks))))
     (define tok (mk-tok 'K "x"))
     (parameterize ([current-parse-cache (make-parse-cache)])
-      (p (list tok))
-      (p (list tok)))
+      (p (tokens->stream (list tok)))
+      (p (tokens->stream (list tok))))
     (check-equal? (unbox calls) 1))
 
   (test-case "a DIFFERENT (non-eq?) token object, same content, misses"
@@ -238,8 +250,8 @@
                             (set-box! calls (add1 (unbox calls)))
                             (values (green-token 'k 1 'x) toks))))
     (parameterize ([current-parse-cache (make-parse-cache)])
-      (p (list (mk-tok 'K "x")))
-      (p (list (mk-tok 'K "x"))))  ; distinct object, equal? content
+      (p (tokens->stream (list (mk-tok 'K "x"))))
+      (p (tokens->stream (list (mk-tok 'K "x")))))  ; distinct object, equal? content
     (check-equal? (unbox calls) 2))
 
   (test-case "span invalidation: a composite rule whose leading token survived still misses if its span overlapped the edit"
@@ -251,11 +263,11 @@
                        (values (green-token 'list 10 'fake-subtree) toks))))
     (define cache (make-parse-cache))
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 5)])
-      (composite (list leading-tok)))
+      (composite (tokens->stream (list leading-tok))))
     (check-equal? (unbox inner-atom-calls) 1)
     (parse-cache-invalidate! cache 10 11)
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 5)])
-      (composite (list leading-tok)))
+      (composite (tokens->stream (list leading-tok))))
     (check-equal? (unbox inner-atom-calls) 2))
 
   (test-case "invalidation ignores entries with no overlap"
@@ -266,10 +278,10 @@
     (define tok (mk-tok 'K "abc"))
     (define cache (make-parse-cache))
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 100)])
-      (p (list tok)))                    ; span [100,103)
+      (p (tokens->stream (list tok))))   ; span [100,103)
     (parse-cache-invalidate! cache 0 10) ; nowhere near [100,103)
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 100)])
-      (p (list tok)))
+      (p (tokens->stream (list tok))))
     (check-equal? (unbox calls) 1))      ; still cached, no re-run
 
   (test-case "extra-key disambiguates same token, different mode (Pratt's min-bp analog)"
@@ -277,11 +289,11 @@
     (define tok (mk-tok 'K "x"))
     (define ((box-updater x))
       (set-box! calls (add1 (unbox calls)))
-      (values (green-token 'k 0 'a) null))
+      (values (green-token 'k 0 'a) (tokens->stream null)))
     (parameterize ([current-parse-cache (make-parse-cache)])
-      (memo-ref! 'r (list tok) 0 (box-updater 'a))
-      (memo-ref! 'r (list tok) 1 (box-updater 'b))
-      (memo-ref! 'r (list tok) 0 (box-updater 'a)))
+      (memo-ref! 'r (tokens->stream (list tok)) 0 (box-updater 'a))
+      (memo-ref! 'r (tokens->stream (list tok)) 1 (box-updater 'b))
+      (memo-ref! 'r (tokens->stream (list tok)) 0 (box-updater 'a)))
     (check-equal? (unbox calls) 2))
 
   (test-case "parse-session-unload! clears only that session's cache"
@@ -291,9 +303,9 @@
                             (values (green-token 'k 1 'x) toks))))
     (define c (make-parse-cache))
     (define tok (mk-tok 'K "x"))
-    (parameterize ([current-parse-cache c]) (p (list tok)))
+    (parameterize ([current-parse-cache c]) (p (tokens->stream (list tok))))
     (hash-clear! (parse-cache-table c))
-    (parameterize ([current-parse-cache c]) (p (list tok)))
+    (parameterize ([current-parse-cache c]) (p (tokens->stream (list tok))))
     (check-equal? (unbox calls) 2))
 
   (test-case "a composite rule's entry whose span overlaps an edit must miss, even though its own leading token survived the edit"
@@ -307,13 +319,13 @@
                        (values (green-token 'list 10 'fake-subtree) toks))))
     (define cache (make-parse-cache))
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 5)])
-      (composite (list leading-tok)))   ; caches: offset=5, width=10 -> span [5,15)
+      (composite (tokens->stream (list leading-tok)))) ; caches: offset=5, width=10 -> span [5,15)
     (check-equal? (unbox inner-atom-calls) 1)
     ;; edit at [10,11) - strictly inside [5,15), leading token itself
     ;; untouched (5 < 10)
     (parse-cache-invalidate! cache 10 11)
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 5)])
-      (composite (list leading-tok)))   ; must MISS and re-run, not return the stale entry
+      (composite (tokens->stream (list leading-tok))))   ; must MISS and re-run, not return the stale entry
     (check-equal? (unbox inner-atom-calls) 2))
 
   (test-case "a hit before the edit must not resume parsing through a stale (pre-edit) continuation"
@@ -323,16 +335,16 @@
     (define processed (box null))  ; records the actual token object each MISS operated on
     (define leaf
       (memoize 'leaf (λ (toks)
-                       (define tok (car toks))
+                       (define tok (stream-peek toks))
                        (set-box! processed (cons tok (unbox processed)))
-                       (values (green-token 'k (lex:token-width tok) tok) (cdr toks)))))
+                       (values (green-token 'k (lex:token-width tok) tok) (stream-rest toks)))))
     (define A (mk-tok 'K "a"))
     (define B (mk-tok 'K "b"))    ; will be "replaced" by B*
     (define C (mk-tok 'K "c"))
     (define cache (make-parse-cache))
     ;; first "parse": A at offset 0, B at offset 1, C at offset 2
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 0)])
-      (define-values (_a r1) (leaf (list A B C)))
+      (define-values (_a r1) (leaf (tokens->stream (list A B C))))
       (define-values (_b r2) (leaf r1))
       (leaf r2))
     ;; "edit": B is replaced by a new object B* at the same offset/width
@@ -342,7 +354,7 @@
     ;; reparse against the REAL current stream [A B* C] - A and C are the same
     ;; eq? objects as before, B* is new
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 0)])
-      (define-values (_a r1) (leaf (list A B* C)))
+      (define-values (_a r1) (leaf (tokens->stream (list A B* C))))
       (define-values (_b r2) (leaf r1))
       (leaf r2))
     ;; B* must have actually been processed (cache miss, correctly
@@ -357,13 +369,13 @@
     ;; the same 'sexpr-wraps-'list-wraps-'sexpr* shape as
     ;; langs/sexpr.rkt, entirely with synthetic tokens.
     (define (mini-consume kind toks)
-      (define tok (car toks))
+      (define tok (stream-peek toks))
       (bump-parse-offset! (lex:token-width tok))
-      (values (green-token kind (lex:token-width tok) tok) (cdr toks)))
+      (values (green-token kind (lex:token-width tok) tok) (stream-rest toks)))
 
     (define (mini-sexpr toks)
       (memo-ref! 'sexpr toks null
-                 (λ () (if (eq? (lex:token-kind (car toks)) 'Open)
+                 (λ () (if (eq? (lex:token-kind (stream-peek toks)) 'Open)
                            (mini-list toks)
                            (mini-consume 'atom toks)))))
 
@@ -372,7 +384,7 @@
                  (λ ()
                    (define-values (_open toks1) (mini-consume 'open toks))
                    (let loop ([toks toks1] [children null])
-                     (if (eq? (lex:token-kind (car toks)) 'Close)
+                     (if (eq? (lex:token-kind (stream-peek toks)) 'Close)
                          (let-values ([(_close rest) (mini-consume 'close toks)])
                            (values (intern-branch! 'list (reverse children)) rest))
                          (let-values ([(child toks*) (mini-sexpr toks)])
@@ -393,7 +405,9 @@
     (define T-close2 (mk-tok 'Close ")"))
     (define T-baz (mk-tok 'Atom "z"))
     (define T-close1 (mk-tok 'Close ")"))
-    (define toks1 (list T-open1 T-foo T-open2 T-bar T-one T-two T-close2 T-baz T-close1))
+    (define toks1
+      (tokens->stream
+       (list T-open1 T-foo T-open2 T-bar T-one T-two T-close2 T-baz T-close1)))
 
     (define cache (make-parse-cache))
     (define tree1
@@ -404,7 +418,9 @@
     ;; "edit": T-one -> T-one*, same width, same offset, different object
     (define T-one* (mk-tok 'Atom "9"))
     (parse-cache-invalidate! cache 4 5) ; T-one's span, by hand: [4,5)
-    (define toks2 (list T-open1 T-foo T-open2 T-bar T-one* T-two T-close2 T-baz T-close1))
+    (define toks2
+      (tokens->stream
+       (list T-open1 T-foo T-open2 T-bar T-one* T-two T-close2 T-baz T-close1)))
 
     (define tree2
       (parameterize ([current-parse-cache cache] [current-parse-offset (box 0)])

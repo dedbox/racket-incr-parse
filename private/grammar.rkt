@@ -168,15 +168,18 @@
            racket/list
            rope
            "green.rkt"
-           "hole-ghost.rkt")
+           "hole-ghost.rkt"
+           "token-stream.rkt")
 
   ;; Hand-built tokens, bypassing a real lexer.
   (define (mk-tok kind str)
     (lex:token kind (string-length str) (string->rope str) null null null))
   (define (toks . pairs)
-    (let loop ([ps pairs])
-      (if (null? ps) (list (mk-tok 'incr-lex:eof ""))
-          (cons (mk-tok (car ps) (cadr ps)) (loop (cddr ps))))))
+    (tokens->stream
+     (let loop ([ps pairs])
+       (if (null? ps)
+           (list (mk-tok 'incr-lex:eof ""))
+           (cons (mk-tok (car ps) (cadr ps)) (loop (cddr ps)))))))
 
   ;; Reimplements langs/sexpr.rkt's grammar, to check the expansion has
   ;; the same shape as that hand-written file.
