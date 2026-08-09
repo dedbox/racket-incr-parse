@@ -53,9 +53,12 @@
 ;; equivalence. The middle level must be eq?-keyed. extra-key (e.g. Pratt's
 ;; min-bp) must be small immutable data to ensure equal?-keying it at the
 ;; innermost level is safe.
-(struct parse-cache (table spans) #:transparent)
+(struct parse-cache (table spans pass-seen) #:transparent)
 
-(define (make-parse-cache) (parse-cache (make-hash) (make-hash)))
+(define (make-parse-cache) (parse-cache (make-hash) (make-hash) (make-hash)))
+
+(define (parse-cache-begin-pass! cache)
+  (hash-clear! (parse-cache-pass-seen cache)))
 
 ;; #f = memoization disabled. Every wrapped parser degrades to a pure
 ;; passthrough when this is unset.
@@ -92,35 +95,36 @@
     [else
      (define token (stream-peek toks))
      (define start (current-offset))
-     ;; The starting offset is folded into the key itself, not just
-     ;; extra-key.
-     ;;
-     ;; A leading token's eq?-identity does not imply a unique document
-     ;; position. incr-lex content-interns tokens process-wide, so two
-     ;; unrelated occurrences of identical text plus identical trivia become
-     ;; the same token object. Without keying on offsetd, two call sites that
-     ;; happen to share that one token object would alias onto the same cache
-     ;; slot and one would silently return the other's tree, regardless of
-     ;; what actually follows at either site. This showed up for real the
-     ;; first time a grammar's test fixture had two structurally-identical
-     ;; leaves in it. Keying on offset makes the collision structurally
-     ;; impossible, so it doesn't need to be detected and recovered from after
-     ;; the fact.
-     (define key (cons extra-key start))
-     (define by-token (hash-ref! (parse-cache-table cache) rule-id make-hasheq))
-     (define by-key   (hash-ref! by-token token make-hash))
+     ;; seen-key identifies the exact call site for this pass' collision
+     ;; check. The persistent table is keyed on extra-key alone. See the
+     ;; header comment above for why they are two different things.
+     (define seen-key (list rule-id token extra-key))
+     (define prior-start (hash-ref (parse-cache-pass-seen cache) seen-key #f))
      (cond
-       [(hash-ref by-key key #f)
-        => (λ (entry)
-             (bump-parse-offset! (cache-entry-width entry))
-             (values (cache-entry-tree entry)
-                     (stream-advance toks (cache-entry-ntoks entry))))]
+       [(and prior-start (not (= prior-start start)))
+        ;; This is the same (rule-id, token, extra-key) triple, already looked
+        ;; up earlier in this pass, at a different offset, which only happens
+        ;; on a content-interning collision. Compute it fresh, without
+        ;; touching the table. The table entry belongs to whichever position
+        ;; got here first, and overwriting it would just move the problem onto
+        ;; that position's next lookup instead of fixing it.
+        (thunk)]
        [else
-        (define-values (tree rest) (thunk))
-        (define width (green-tree-width tree))
-        (hash-set! by-key key (cache-entry tree (stream-delta toks rest) start width))
-        (bucket-index-add! cache (entry-ref rule-id token key start (+ start width)))
-        (values tree rest)])]))
+        (hash-set! (parse-cache-pass-seen cache) seen-key start)
+        (define by-token (hash-ref! (parse-cache-table cache) rule-id make-hasheq))
+        (define by-key   (hash-ref! by-token token make-hash))
+        (cond
+          [(hash-ref by-key extra-key #f)
+           => (λ (entry)
+                (bump-parse-offset! (cache-entry-width entry))
+                (values (cache-entry-tree entry)
+                        (stream-advance toks (cache-entry-ntoks entry))))]
+          [else
+           (define-values (tree rest) (thunk))
+           (define width (green-tree-width tree))
+           (hash-set! by-key extra-key (cache-entry tree (stream-delta toks rest) start width))
+           (bucket-index-add! cache (entry-ref rule-id token extra-key start (+ start width)))
+           (values tree rest)])])]))
 
 ;; Convenience wrapper for ordinary (listof token?) -> (values ...) rules
 (define ((memoize rule-id parser #:extra-key [extra-key-fn (λ (toks) null)]) toks)
@@ -466,4 +470,27 @@
       ((run 'first) (tokens->stream (list shared-tok))))
     (parameterize ([current-parse-cache cache] [current-parse-offset (box 100)])
       (define-values (tree _rest) ((run 'second) (tokens->stream (list shared-tok))))
-      (check-eq? (green-token-token tree) 'second))))
+      (check-eq? (green-token-token tree) 'second)))
+
+  (test-case "a length-changing edit shifts a later, untouched leaf's absolute offset - it must still be reused (eq?), not just left uninvalidated"
+    (define leaf
+      (memoize 'leaf (λ (toks)
+                       (define tok (stream-peek toks))
+                       (values (green-token 'k (lex:token-width tok) tok) (stream-rest toks)))))
+    (define A (mk-tok 'K "a"))     ; width 1
+    (define B (mk-tok 'K "bbb"))   ; width 3, distinct content - never collides with A
+    (define cache (make-parse-cache))
+    (define tree-b-1
+      (parameterize ([current-parse-cache cache] [current-parse-offset (box 0)])
+        (define-values (_a r1) (leaf (tokens->stream (list A B))))
+        (define-values (tb _r2) (leaf r1))
+        tb))
+    (define A+ (mk-tok 'K "aaa"))  ; width 3, was 1
+    (parse-cache-invalidate! cache 0 1)  ; A's old span only
+    (parse-cache-begin-pass! cache)      ; a fresh top-level parse, same as parse-session-run does
+    (define tree-b-2
+      (parameterize ([current-parse-cache cache] [current-parse-offset (box 0)])
+        (define-values (_a r1) (leaf (tokens->stream (list A+ B))))
+        (define-values (tb _r2) (leaf r1))
+        tb))
+    (check-eq? tree-b-1 tree-b-2)))
