@@ -2,31 +2,63 @@
 
 ;; incr-parse/private/memo.rkt
 ;;
-;; Per-rule memoization, keyed on eq?-identity of the incr-lex token a rule
-;; started at PLUS explicit, offset-based invalidation on edit.
+;; Per-rule memoization, keyed on eq?-identity of the incr-lex token where a
+;; rule started at, plus a rule-specific extra key, PLUS explicit,
+;; offset-based invalidation on edit and a same-pass collision guard.
 ;;
-;; Identity alone isn't enough. A composite rule's cache entry can have an
-;; unchanged LEADING token while an edit lies strictly inside its own
-;; consumed span. A surviving token deep in the prefix says nothing about what
-;; happened later inside the rule that started there. Therefore, every cache
-;; entry also records its absolute [offset, offset+width) span, and every edit
-;; eagerly evicts any entry whose span overlaps the edit's damage range.
-;; Entries with no overlap are untouched.
+;; First: a composite rule's cache entry can have an unchanged leading token
+;; for an edit strictly inside its consumed span. A surviving token deep in
+;; the prefix says nothing about what happened later inside the rule that
+;; started there. Therefore, every cache entry also records its absolute
+;; [offset, offset+width) span, and every edit eagerly evicts any entry whose
+;; span overlaps the edit's damage range. Entries with no overlap are
+;; unaffected.
+;;
+;; Second, and the reason a cache entry is NOT keyed on its own offset:
+;; incr-lex content-interns tokens process-wide, so two unrelated occurrences
+;; of identical text with identical trivia become the SAME token object. An
+;; edit anywhere in the document shifts the absolute offset of everything
+;; after it, even unrelated content. Since reusing old cached data at new
+;; offsets is what the cache is for, keying on absolute offsets breaks it.
+;; Because edits that change the length of cache entries shift all subsequent
+;; tokens, an offset-keyed lookup would never find its own entry again,
+;; defeating incremental reuse for anything after the edit point.
+;;
+;; We do, however, need to be careful in the narrower case where two different
+;; positions within the same parse pass sharing one content-interned token.
+;; That's a same-pass collision, not a cross-pass position shift, and the two
+;; need opposite treatment. A collision must never return the other position's
+;; tree, and a shift must always be allowed to hit.
+;;
+;; current-pass-seen distinguishes them. It records the offset where each
+;; (rule-id, token, extra-key) triple was found during the current pass and
+;; resets at the start of every fresh top-level parse via
+;; parse-cache-begin-pass!, which must be called at the top of anything that
+;; starts a parse pass. parse-session-run does this, and anything that
+;; bypasses it (by calling memo-ref!/memoize directly against a shared cache
+;; across what should be two separate passes) also needs to call it
+;; explicitly, or a later pass will see the earlier pass's stale offsets and
+;; wrongly treat ordinary cross-edit reuse as a collision. A repeat lookup of
+;; the same triple within one pass, at a different offset, can only mean a
+;; same-pass collision, and forces a fresh, uncached computation instead of
+;; trusting whatever's in the table. A lookup in a new pass starts this
+;; tracking over, so tokens preserved across a splice at shifted absolute
+;; positions are never penalized.
 ;;
 ;; The offset itself is tracked via a dynamically-scoped, explicitly mutated
-;; box (current-parse-offset), advanced at the ONE place any token is actually
-;; consumed (consume-as, in combinators.rkt). This is NOT part of any Green
-;; node - those stay position-free. It is transient parse-time bookkeeping
-;; that exists purely so cache entries know where they came from.
+;; box (current-parse-offset), which is updated at the one place tokens are
+;; actually consumed (consume-as, in combinators.rkt). This is not part of any
+;; Green node, which stay position-free. It is transient parse-time
+;; bookkeeping that exists purely so cache entries know where they came from.
 ;;
 ;; A cache entry never stores or returns a captured token-stream continuation.
-;; A hit for an entry whose span is untouched can still immediately precede
-;; tokens an edit replaced. If the entry returned its old `rest` stream, the
-;; edit is lost. Instead, a hit caches a token count (ntoks) and always
-;; derives `rest` via (stream-advance toks ntoks) against the stream passed
-;; into the current call, which will never be stale. Since toks is a
-;; token-stream (see token-stream.rkt), stream-advance is an O(1) index
-;; update.
+;; A hit for an entry whose span is unaffected can still immediately precede
+;; tokens an edit replaced. If the entry returns its old `rest` stream, the
+;; edit has already superseded whatever comes after it. Instead, a hit caches
+;; a token count (ntoks) and always derives `rest` via (stream-advance toks
+;; ntoks) against the stream passed into the current call, which will never be
+;; stale. Since toks is a token stream, stream-advance is an O(1) index
+;; increment.
 
 (require (prefix-in lex: incr-lex)
          racket/list
@@ -213,6 +245,7 @@
 ;; memoize/memo-ref! calls reached during parsing reuse entries from prior
 ;; parses of THIS session and write new ones back into it.
 (define (parse-session-run sess parse-entry)
+  (parse-cache-begin-pass! (parse-session-cache sess))
   (parameterize ([current-parse-cache (parse-session-cache sess)]
                  [current-parse-offset (box 0)])
     (define-values (tree rest) (parse-entry (tokens->stream (parse-session-tokens sess))))
@@ -234,6 +267,7 @@
 (define (parse-session-unload! sess)
   (hash-clear! (parse-cache-table (parse-session-cache sess)))
   (hash-clear! (parse-cache-spans (parse-session-cache sess)))
+  (hash-clear! (parse-cache-pass-seen (parse-session-cache sess)))
   (void))
 
 (module+ test
@@ -476,6 +510,7 @@
     (define leaf
       (memoize 'leaf (λ (toks)
                        (define tok (stream-peek toks))
+                       (bump-parse-offset! (lex:token-width tok))
                        (values (green-token 'k (lex:token-width tok) tok) (stream-rest toks)))))
     (define A (mk-tok 'K "a"))     ; width 1
     (define B (mk-tok 'K "bbb"))   ; width 3, distinct content - never collides with A
