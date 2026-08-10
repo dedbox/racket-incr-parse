@@ -519,9 +519,21 @@
       (check-eq? (green-token-token tree) 'second)))
 
   (test-case "a length-changing edit shifts a later, untouched leaf's absolute offset - it must still be reused (eq?), not just left uninvalidated"
+    ;; We implement a custom alternative to consume-as, since memo.rkt cannot
+    ;; depend on combinators.rkt because combinators.rkt depends on memo.rkt.
+    ;; We must make sure to increment current-parse-offset, just as consume-as
+    ;; would. A cache miss in memo-ref! never increments the offset on its
+    ;; own. Only a hit increments the offset, because then it skips calling
+    ;; this thunk entirely. A miss trusts the thunk, or whatever real
+    ;; consuming primitive it wraps, to have already advanced the offset as a
+    ;; side effect. A thunk that consumes a token without incrementing breaks
+    ;; that assumption silently: the next sibling's cache entry gets the wrong
+    ;; start offset, which can make an unrelated edit's invalidation sweep
+    ;; spuriously overlap and evict it.
     (define leaf
       (memoize 'leaf (λ (toks)
                        (define tok (stream-peek toks))
+                       (bump-parse-offset! (lex:token-width tok))
                        (values (green-token 'k (lex:token-width tok) tok) (stream-rest toks)))))
     (define A (mk-tok 'K "a"))     ; width 1
     (define B (mk-tok 'K "bbb"))   ; width 3, distinct content - never collides with A
