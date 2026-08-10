@@ -112,8 +112,14 @@
 
 (define (program-stop? kind) (eq? kind 'incr-lex:eof))
 
+;; Named toplevel-program, not the generic program to avoid a conflict with
+;; arith.rkt, required below, which registers its own top-level elaborator
+;; under 'program for an unrelated top-level shape. Both modules load into the
+;; same process wherever this file is used, so the two kind symbols must not
+;; collide in the shared current-ast-elaborators table.
+
 (define parse-program
-  (rep 'program parse-stmt-line program-stop?))
+  (rep 'toplevel-program parse-stmt-line program-stop?))
 
 ;;; --------------------------------------------------------------------------
 ;;; AST
@@ -130,7 +136,7 @@
 (define-elaborator stmt-line (branch)
   (elaborate (car (green-branch-children branch))))
 
-(define-elaborator program (branch)
+(define-elaborator toplevel-program (branch)
   (ast-program (map elaborate (green-branch-children branch))))
 
 ;;; --------------------------------------------------------------------------
