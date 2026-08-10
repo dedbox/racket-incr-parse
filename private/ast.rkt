@@ -61,8 +61,11 @@
 ;; per-production control rather than an imposed generic bottom-up walk.
 (define current-ast-elaborators (make-parameter (make-hasheq)))
 
-;; intentionally non-weak
-(define current-ast-cache (make-parameter (make-hasheq)))
+;; Weak by eq?-identity, matching `green-cache`'s existing precedent. This is
+;; safe to share across documents because the key is the identity of
+;; immutable, hash-consed Green data, and a weak table lets entries for
+;; discarded Green nodes be reclaimed.
+(define current-ast-cache (make-parameter (make-weak-hasheq)))
 
 ;; Hook for extracting a token's payload text, leading/trailing trivia
 ;; excluded.
@@ -74,7 +77,16 @@
 ;;
 ;; Narrowly-scoped internal mutation. Registration is one-time setup per
 ;; language module.
+;;
+;; Now errors on a duplicate `kind` instead of letting a second registration
+;; silently win. This is the cheap half of guarding against cross-grammar kind
+;; collisions. It only catches a collision within a single elaborator table.
+;; It does not catch collisions across two different tables used together in
+;; the same process.
 (define (register-elaborator! kind proc)
+  (when (hash-has-key? (current-ast-elaborators) kind)
+    (error 'register-elaborator!
+           "elaborator already registered for kind: ~e" kind))
   (hash-set! (current-ast-elaborators) kind proc))
 
 ;; Expands to a `register-elaborator!` call, binding `branch` to the raw
@@ -171,4 +183,10 @@
       (cons 'elaborated (green-branch-children branch)))
     (define b (green-branch 'some-kind 0 (list (ghost 'ghost 0 'x))))
     (define a (elaborate b))
-    (check-equal? (car a) 'elaborated)))
+    (check-equal? (car a) 'elaborated))
+
+  ;; --- duplicate registration for the same kind is an error --------
+  (parameterize ([current-ast-elaborators (fresh-elaborators)])
+    (register-elaborator! 'dup (λ (branch) 'first))
+    (check-exn exn:fail?
+               (λ () (register-elaborator! 'dup (λ (branch) 'second))))))
