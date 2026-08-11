@@ -19,11 +19,8 @@
 ;; describing two different documents' behavior.
 
 (require profile
-         rope
-         (only-in "../langs/arith.rkt" arith-nud-table arith-led-table arith-bp-table)
          "../langs/toplevel.rkt"
-         "../private/memo.rkt"
-         "../private/pratt.rkt")
+         "../private/memo.rkt")
 
 ;;; --------------------------------------------------------------------------
 ;;; Corpus - same generator as incremental-reparse-latency.rkt, duplicated
@@ -52,10 +49,7 @@
           [else (loop (add1 d))])))
 
 (define (run-parse sess)
-  (parameterize ([current-nud-table arith-nud-table]
-                 [current-led-table arith-led-table]
-                 [current-bp-table  arith-bp-table])
-    (parse-session-run sess parse-program)))
+  (parse-session-run sess))
 
 ;;; --------------------------------------------------------------------------
 ;;; profile-cold-parse: a single full parse of a large document, from a
@@ -68,8 +62,7 @@
   (define raw (make-corpus width))
   (printf "profiling a single cold parse, width=~a chars\n" (string-length raw))
   (void (profile-thunk
-         (λ () (run-parse (make-parse-session toplevel-lex toplevel-apply-edit
-                                              string-rope-ropeable raw))))))
+         (λ () (run-parse (make-parse-session toplevel-descriptor raw))))))
 
 ;;; --------------------------------------------------------------------------
 ;;; profile-typical-edits: many sequential small edits against one
@@ -82,7 +75,7 @@
 
 (define (profile-typical-edits #:width [width 500000] #:edits [edits 200])
   (define raw0 (make-corpus width))
-  (define sess0 (make-parse-session toplevel-lex toplevel-apply-edit string-rope-ropeable raw0))
+  (define sess0 (make-parse-session toplevel-descriptor raw0))
   (run-parse sess0)
   (printf "profiling ~a typical incremental edits against a width=~a session\n" edits (string-length raw0))
   (void
@@ -105,7 +98,7 @@
 
 (define (profile-single-edit #:width [width 500000])
   (define raw (make-corpus width))
-  (define sess0 (make-parse-session toplevel-lex toplevel-apply-edit string-rope-ropeable raw))
+  (define sess0 (make-parse-session toplevel-descriptor raw))
   (run-parse sess0)
   (define mid (quotient (string-length raw) 2))
   (define pos (nearest-digit-index raw mid))

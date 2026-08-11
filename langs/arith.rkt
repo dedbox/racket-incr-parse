@@ -20,6 +20,7 @@
          "../private/combinators.rkt"
          "../private/green.rkt"
          "../private/hole-ghost.rkt"
+         "../private/memo.rkt"
          "../private/pratt.rkt"
          "../private/printer.rkt"
          "../private/token-stream.rkt")
@@ -135,6 +136,21 @@
 
 (define (elaborate-arith-string str)
   (elaborate (parse-arith-string str)))
+
+;; The bound grammar descriptor for this file. #:with-setup installs arith's
+;; nud/led/bp tables for the dynamic extent of every parse-session-run against
+;; a session created from this descriptor.
+(define (arith-with-setup run)
+  (λ (toks)
+    (parameterize ([current-nud-table arith-nud-table]
+                   [current-led-table arith-led-table]
+                   [current-bp-table  arith-bp-table])
+      (run toks))))
+
+(define arith-descriptor
+  (make-grammar-descriptor arith-lex arith-apply-edit parse-program
+                            #:with-setup arith-with-setup
+                            #:ropeable string-rope-ropeable))
 
 ;;; --------------------------------------------------------------------------
 ;;; Tests

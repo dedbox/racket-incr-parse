@@ -32,12 +32,9 @@
 ;; Pratt composition), and it scales cleanly by adding more independent
 ;; statements, unlike hazelnut.rkt's single-expression grammar.
 
-(require (only-in "../langs/arith.rkt" arith-nud-table arith-led-table arith-bp-table)
-         "../langs/toplevel.rkt"
+(require "../langs/toplevel.rkt"
          "../private/memo.rkt"
-         "../private/pratt.rkt"
-         racket/format
-         rope)
+         racket/format)
 
 (provide run-reparse-latency-sweep)
 
@@ -149,10 +146,7 @@
 ;;; --------------------------------------------------------------------------
 
 (define (run-parse sess)
-  (parameterize ([current-nud-table arith-nud-table]
-                 [current-led-table arith-led-table]
-                 [current-bp-table  arith-bp-table])
-    (parse-session-run sess parse-program)))
+  (parse-session-run sess))
 
 (define WARMUP-FRACTIONS '(0.1 0.3 0.7 0.9))
 
@@ -187,7 +181,7 @@
 
 (define (bench-cell width fraction #:trials [trials 5])
   (define raw0 (make-corpus width))
-  (define sess0 (make-parse-session toplevel-lex toplevel-apply-edit string-rope-ropeable raw0))
+  (define sess0 (make-parse-session toplevel-descriptor raw0))
   (run-parse sess0) ; cold parse once before warmup, matching real "open a file" behavior
   (define-values (sess1 raw1) (warm-up sess0 raw0))
   (define final-width (string-length raw1))
@@ -195,8 +189,7 @@
   (define incr-ms (median-incremental-ms sess1 start old-len chunk final-width #:trials trials))
   (define new-raw (string-append (substring raw1 0 start) chunk (substring raw1 (+ start old-len))))
   (define full-ms
-    (median-ms (λ () (run-parse (make-parse-session toplevel-lex toplevel-apply-edit
-                                                     string-rope-ropeable new-raw)))
+    (median-ms (λ () (run-parse (make-parse-session toplevel-descriptor new-raw)))
                final-width #:trials trials))
   (list final-width fraction incr-ms full-ms (/ full-ms (max incr-ms 0.001))))
 

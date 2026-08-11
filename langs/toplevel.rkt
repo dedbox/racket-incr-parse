@@ -158,6 +158,15 @@
 (define (elaborate-toplevel-string str)
   (elaborate (parse-toplevel-string str)))
 
+;; The bound grammar descriptor for this file. Reuses arith-with-setup
+;; directly, unmodified. This grammar's expr positions ARE arith.rkt's
+;; parse-expr, so the table installation is identical, not just similarly
+;; shaped.
+(define toplevel-descriptor
+  (make-grammar-descriptor toplevel-lex toplevel-apply-edit parse-program
+                           #:with-setup arith-with-setup
+                           #:ropeable string-rope-ropeable))
+
 ;;; --------------------------------------------------------------------------
 ;;; Tests
 ;;; --------------------------------------------------------------------------
@@ -209,19 +218,11 @@
 
   (test-case "incremental reparse: an untouched statement's tree survives an edit to a different line"
     (define src "x = 1\ny = 2\nz = 3")
-    (define sess1 (make-parse-session toplevel-lex toplevel-apply-edit string-rope-ropeable src))
-    (define tree1
-      (parameterize ([current-nud-table arith-nud-table]
-                     [current-led-table arith-led-table]
-                     [current-bp-table  arith-bp-table])
-        (parse-session-run sess1 parse-program)))
+    (define sess1 (make-parse-session toplevel-descriptor src))
+    (define tree1 (parse-session-tree (parse-session-run sess1)))
     ;; offset 4 is the "1" in "x = 1" - replace it with "11"
     (define sess2 (parse-session-edit sess1 4 1 "11"))
-    (define tree2
-      (parameterize ([current-nud-table arith-nud-table]
-                     [current-led-table arith-led-table]
-                     [current-bp-table  arith-bp-table])
-        (parse-session-run sess2 parse-program)))
+    (define tree2 (parse-session-tree (parse-session-run sess2)))
     (check-equal? (green->source tree2) "x = 11\ny = 2\nz = 3")
     (define (find-z-line t)
       (cond [(and (green-branch? t) (eq? (green-tree-kind t) 'stmt-line)

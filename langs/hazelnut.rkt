@@ -308,6 +308,28 @@
 (define (elaborate-hazelnut-string str)
   (elaborate (parse-hazelnut-string str)))
 
+;; The bound grammar descriptor for this file. The entry point is Expr. Type
+;; is only ever reached internally, via parse-type, wherever an Expr
+;; production expects one. #:with-setup installs Expr's tables and
+;; expr-rule-id. parse-type installs Type's own tables for its dynamic extent
+;; regardless, but setting expr-rule-id here too keeps this descriptor's setup
+;; a complete, self-contained mirror of parse-hazelnut-string's parameterize
+;; block below, instead of a partial one that relies on the default
+;; coincidentally being 'expr.
+(define (hazelnut-with-setup run)
+  (λ (toks)
+    (parameterize ([current-nud-table expr-nud-table]
+                   [current-led-table expr-led-table]
+                   [current-bp-table  expr-bp-table]
+                   [current-expr-rule-id 'expr])
+      (run toks))))
+
+(define hazelnut-descriptor
+  (make-grammar-descriptor hazelnut-lex hazelnut-apply-edit
+                           (λ (toks) (parse-expr toks 0))
+                           #:with-setup hazelnut-with-setup
+                           #:ropeable string-rope-ropeable))
+
 ;;; --------------------------------------------------------------------------
 ;;; Tests
 ;;; --------------------------------------------------------------------------
@@ -383,22 +405,11 @@
 
   (test-case "incremental reparse: an untouched deeply-nested sibling survives an edit"
     (define src "λx:ℕ.((x + 1) * (x + 2)) + x")
-    (define sess1 (make-parse-session hazelnut-lex hazelnut-apply-edit string-rope-ropeable src))
-    (define (run-expr toks) (parse-expr toks 0))
-    (define tree1
-      (parameterize ([current-nud-table expr-nud-table]
-                     [current-led-table expr-led-table]
-                     [current-bp-table  expr-bp-table]
-                     [current-expr-rule-id 'expr])
-        (parse-session-run sess1 run-expr)))
+    (define sess1 (make-parse-session hazelnut-descriptor src))
+    (define tree1 (parse-session-tree (parse-session-run sess1)))
     ;; offset 11 is the "1" inside "x + 1" - replace it with "11"
     (define sess2 (parse-session-edit sess1 11 1 "11"))
-    (define tree2
-      (parameterize ([current-nud-table expr-nud-table]
-                     [current-led-table expr-led-table]
-                     [current-bp-table  expr-bp-table]
-                     [current-expr-rule-id 'expr])
-        (parse-session-run sess2 run-expr)))
+    (define tree2 (parse-session-tree (parse-session-run sess2)))
     (check-equal? (green->source tree2) "λx:ℕ.((x + 11) * (x + 2)) + x")
     (define (find-plus-2 t)
       (cond [(and (green-branch? t) (eq? (green-tree-kind t) 'binop)

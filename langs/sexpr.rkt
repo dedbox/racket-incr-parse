@@ -133,6 +133,14 @@
 (define (elaborate-sexpr-string str)
   (elaborate (parse-sexpr-string str)))
 
+;; The bound grammar descriptor for this file, for use with
+;; make-parse-session/parse-session-run/workspace-open!. Since sexpr.rkt is
+;; RD-only and therefore installs no Pratt tables, we do not need to specify
+;; #:with-setup.
+(define sexpr-descriptor
+  (make-grammar-descriptor sexpr-lex sexpr-apply-edit parse-program
+                           #:ropeable string-rope-ropeable))
+
 (module+ test
   (require racket/list
            rackunit
@@ -187,12 +195,15 @@
     (check-equal? kinds '(Symbol Number)))
 
   (test-case "incremental reparse: untouched subtree is eq? across an edit"
-    (define sess1 (make-parse-session sexpr-lex sexpr-apply-edit string-rope-ropeable
-                                      "(quux (bar 1 2) baz)")) ; was (foo ...) - collided with an earlier test-case's fixture
-    (define tree1 (parse-session-run sess1 parse-program))
+    (define sess1
+      (make-parse-session
+       sexpr-descriptor
+       "(quux (bar 1 2) baz)")) ; was (foo ...) - collided with an earlier test-case's fixture
+    (define tree1 (parse-session-tree (parse-session-run sess1)))
     ;; offset 10 is the "1" inside (bar 1 2) - replace it with "11"
     (define sess2 (parse-session-edit sess1 11 1 "11"))
-    (define tree2 (parse-session-run sess2 parse-program))
+    (define sess2* (parse-session-run sess2))
+    (define tree2 (parse-session-tree sess2*))
     (check-equal? (green->source tree2) "(quux (bar 11 2) baz)")
     (define (find-baz t)
       (cond [(and (green-token? t)
@@ -202,7 +213,7 @@
     (define baz1 (find-baz tree1))
     (define baz2 (find-baz tree2))
     (check-eq? baz1 baz2)
-    (parse-session-unload! sess2))
+    (parse-session-unload! sess2*))
 
   (test-case "AST: nested list elaborates to nested ast-list, parens dropped"
     (define ast (elaborate-sexpr-string "(foo (bar 1) baz)"))
