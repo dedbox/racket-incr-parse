@@ -56,7 +56,8 @@
 ;;; Loosest to tightest: add(1) < mul(2) < unary-minus(3).
 ;;; ---------------------------------------------------------------------
 ;;; Also produces arith-grammar (a ready `grammar` value - see
-;;; ../main.rkt), arith-nud-table/-led-table/-bp-table, and an explicitly
+;;; ../main.rkt), expr-nud-table/-led-table/-bp-table (named from the sort,
+;;; not the grammar - see core/operator-grammar.rkt), and an explicitly
 ;;; bound parse-expr, none of which this file writes by hand.
 
 (define-operator-grammar arith

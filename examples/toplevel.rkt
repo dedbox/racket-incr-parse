@@ -1,9 +1,9 @@
 #lang racket/base
 
-;; incr-parse/langs/toplevel.rkt
+;; incr-parse/examples/toplevel.rkt
 ;;
-;; Toy grammar #3: newline-separated top-level statements over arith.rkt's own
-;; expression grammar.
+;; Example grammar #3: newline-separated top-level statements over
+;; arith.rkt's own expression grammar.
 ;;
 ;;   x = 1
 ;;   y = x + 2
@@ -16,9 +16,12 @@
 ;;              | expr             (bare expression statement)
 ;;   seps      := Newline*
 ;;
-;; expr is arith.rkt's parse-expr, reused directly against its own nud/led/bp
-;; tables - this file adds no new expression syntax, only statement sequencing
-;; on top.
+;; expr is arith.rkt's parse-expr, reused directly - this file adds no new
+;; expression syntax, only statement sequencing on top. Since
+;; define-operator-grammar's parse-expr always installs its own tables
+;; before delegating to core/pratt.rkt, calling it here needs no setup of
+;; any kind - no #:setup on this file's own grammar value either, unlike
+;; the hand-written *-with-setup wrapper this file used to need.
 ;;
 ;; Newline is promoted from arith.rkt's trivia to a real token here, via a
 ;; second define-lexer instantiation over the same token definitions
@@ -29,6 +32,10 @@
 ;; Disambiguating "Ident = expr" from a bare "Ident" expression needs one
 ;; token of lookahead past the Ident. That's peek2-kind, a small addition to
 ;; combinators.rkt alongside peek-kind. try/alt would also work here.
+;; Neither define-grammar nor define-operator-grammar expresses this kind
+;; of lookahead disambiguation, which is exactly why this file is written
+;; directly against the combinator primitives (via ../grammar.rkt) rather
+;; than either DSL.
 ;;
 ;; Malformed-input handling:
 ;;   - A missing separator between two statements is not diagnosed at all. The
@@ -46,14 +53,8 @@
 
 (require (prefix-in : incr-lex)
          rope
-         "../private/ast.rkt"
-         "../private/combinators.rkt"
-         "../private/green.rkt"
-         "../private/hole-ghost.rkt"
-         "../private/memo.rkt"
-         "../private/pratt.rkt"
-         "../private/printer.rkt"
-         "../private/token-stream.rkt"
+         (except-in "../grammar.rkt" parse-expr)
+         "../main.rkt"
          "arith.rkt")
 
 (provide (all-defined-out))
@@ -112,12 +113,11 @@
 
 (define (program-stop? kind) (eq? kind 'incr-lex:eof))
 
-;; Named toplevel-program, not the generic program to avoid a conflict with
-;; arith.rkt, required below, which registers its own top-level elaborator
-;; under 'program for an unrelated top-level shape. Both modules load into the
-;; same process wherever this file is used, so the two kind symbols must not
-;; collide in the shared current-ast-elaborators table.
-
+;; Named toplevel-program, not the generic program - arith.rkt (required
+;; above) registers its OWN top-level elaborator under 'program for its own,
+;; unrelated top-level shape (expr* vs. this grammar's stmt-line*). Both
+;; modules load into the same process wherever this file is used, so the two
+;; kind symbols must not collide in the shared current-ast-elaborators table.
 (define parse-program
   (rep 'toplevel-program parse-stmt-line program-stop?))
 
@@ -143,29 +143,22 @@
 ;;; Entry Point
 ;;; --------------------------------------------------------------------------
 
+;; The bound grammar value for this file (see ../main.rkt). No #:setup -
+;; parse-program's own calls to parse-expr/parse-assign already install
+;; arith.rkt's tables themselves, every time; there's nothing left for an
+;; outer setup wrapper to do.
+(define toplevel-grammar
+  (make-grammar #:lexer toplevel-lex #:apply-edit toplevel-apply-edit #:start parse-program))
+
+;; A one-shot "give me a tree from a string" convenience - runtime usage,
+;; so it reaches for the make-document/document-parse! runtime API rather
+;; than growing ../grammar.rkt a runtime concept, same as every other
+;; example grammar's own entry point.
 (define (parse-toplevel-string str)
-  (define sess (:make-session toplevel-lex toplevel-apply-edit string-rope-ropeable str))
-  (define toks (tokens->stream (:session->tokens-list sess)))
-  (define-values (tree remaining)
-    (parameterize ([current-nud-table arith-nud-table]
-                   [current-led-table arith-led-table]
-                   [current-bp-table  arith-bp-table])
-      (parse-program toks)))
-  (unless (eq? (peek-kind remaining) 'incr-lex:eof)
-    (error 'parse-toplevel-string "parser did not consume the full token stream"))
-  tree)
+  (document-tree (document-parse! (make-document toplevel-grammar str))))
 
 (define (elaborate-toplevel-string str)
   (elaborate (parse-toplevel-string str)))
-
-;; The bound grammar descriptor for this file. Reuses arith-with-setup
-;; directly, unmodified. This grammar's expr positions ARE arith.rkt's
-;; parse-expr, so the table installation is identical, not just similarly
-;; shaped.
-(define toplevel-descriptor
-  (make-grammar-descriptor toplevel-lex toplevel-apply-edit parse-program
-                           #:with-setup arith-with-setup
-                           #:ropeable string-rope-ropeable))
 
 ;;; --------------------------------------------------------------------------
 ;;; Tests
@@ -173,8 +166,7 @@
 
 (module+ test
   (require racket/list
-           rackunit
-           incr-lex/engine)
+           rackunit)
 
   (define (check-round-trip src)
     (check-equal? (green->source (parse-toplevel-string src)) src))
@@ -218,18 +210,20 @@
 
   (test-case "incremental reparse: an untouched statement's tree survives an edit to a different line"
     (define src "x = 1\ny = 2\nz = 3")
-    (define sess1 (make-parse-session toplevel-descriptor src))
-    (define tree1 (parse-session-tree (parse-session-run sess1)))
+    (define sess (make-session))
+    (session-install-grammar! sess 'toplevel toplevel-grammar)
+    (session-open! sess 'toplevel "doc-1" src)
+    (define tree1 (document-tree (session-document sess "doc-1")))
     ;; offset 4 is the "1" in "x = 1" - replace it with "11"
-    (define sess2 (parse-session-edit sess1 4 1 "11"))
-    (define tree2 (parse-session-tree (parse-session-run sess2)))
+    (define doc2 (session-edit! sess "doc-1" 4 1 "11"))
+    (define tree2 (document-tree doc2))
     (check-equal? (green->source tree2) "x = 11\ny = 2\nz = 3")
     (define (find-z-line t)
       (cond [(and (green-branch? t) (eq? (green-tree-kind t) 'stmt-line)
                   (let ([stmt (car (green-branch-children t))])
                     (and (eq? (green-tree-kind stmt) 'assign)
                          (equal? (rope->string
-                                  (token-payload
+                                  (:token-payload
                                    (green-token-token (car (green-branch-children stmt)))))
                                  "z"))))
              t]
@@ -238,7 +232,7 @@
     (define z-line-1 (find-z-line tree1))
     (define z-line-2 (find-z-line tree2))
     (check-eq? z-line-1 z-line-2)
-    (parse-session-unload! sess2)))
+    (session-close! sess "doc-1")))
 
 (module+ main
   (for ([src (list "x = 1\ny = x + 2\nx + y"

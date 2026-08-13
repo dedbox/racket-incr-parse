@@ -58,7 +58,8 @@
          "core/red.rkt"
          (only-in "core/session.rkt" grammar? make-grammar make-grammar*
                   grammar-lexer grammar-apply-edit grammar-start
-                  grammar-setup grammar-ropeable))
+                  grammar-setup grammar-ropeable)
+         (only-in "core/operator-grammar.rkt" define-operator-grammar))
 
 (provide (all-from-out "core/green.rkt")
          (all-from-out "core/hole-ghost.rkt")
@@ -73,4 +74,5 @@
          (all-from-out "core/red.rkt")
          make-grammar grammar? make-grammar*
          grammar-lexer grammar-apply-edit grammar-start
-         grammar-setup grammar-ropeable)
+         grammar-setup grammar-ropeable
+         define-operator-grammar)

@@ -19,8 +19,9 @@
 ;; describing two different documents' behavior.
 
 (require profile
-         "../langs/toplevel.rkt"
-         "../private/memo.rkt")
+         "../examples/toplevel.rkt"
+         "../core/memo.rkt"
+         "../core/session.rkt")
 
 ;;; --------------------------------------------------------------------------
 ;;; Corpus - same generator as incremental-reparse-latency.rkt, duplicated
@@ -48,12 +49,11 @@
            (+ around d)]
           [else (loop (add1 d))])))
 
-(define (run-parse sess)
-  (parse-session-run sess))
+(define (run-parse doc) (document-parse! doc))
 
 ;;; --------------------------------------------------------------------------
 ;;; profile-cold-parse: a single full parse of a large document, from a
-;;; fresh session and a fresh cache. Where time goes here is entirely
+;;; fresh document and a fresh cache. Where time goes here is entirely
 ;;; "first parse" cost - relex, green-tree construction/hash-consing,
 ;;; memo bookkeeping for entries that all miss (nothing to hit yet).
 ;;; --------------------------------------------------------------------------
@@ -62,11 +62,11 @@
   (define raw (make-corpus width))
   (printf "profiling a single cold parse, width=~a chars\n" (string-length raw))
   (void (profile-thunk
-         (λ () (run-parse (make-parse-session toplevel-descriptor raw))))))
+         (λ () (run-parse (make-document toplevel-grammar raw))))))
 
 ;;; --------------------------------------------------------------------------
 ;;; profile-typical-edits: many sequential small edits against one
-;;; long-lived, warmed-up session - "steady-state editing", aggregated.
+;;; long-lived, warmed-up document - "steady-state editing", aggregated.
 ;;; Deterministic positions (cycling through a handful of fractions), not
 ;;; random, so a re-run profiles the identical scenario.
 ;;; --------------------------------------------------------------------------
@@ -75,19 +75,19 @@
 
 (define (profile-typical-edits #:width [width 500000] #:edits [edits 200])
   (define raw0 (make-corpus width))
-  (define sess0 (make-parse-session toplevel-descriptor raw0))
-  (run-parse sess0)
-  (printf "profiling ~a typical incremental edits against a width=~a session\n" edits (string-length raw0))
+  (define doc0 (make-document toplevel-grammar raw0))
+  (run-parse doc0)
+  (printf "profiling ~a typical incremental edits against a width=~a document\n" edits (string-length raw0))
   (void
    (profile-thunk
     (λ ()
-      (for/fold ([sess sess0] [raw raw0]) ([i (in-range edits)])
+      (for/fold ([doc doc0] [raw raw0]) ([i (in-range edits)])
         (define frac (list-ref EDIT-FRACTIONS (modulo i (length EDIT-FRACTIONS))))
         (define around (min (sub1 (string-length raw)) (inexact->exact (round (* frac (string-length raw))))))
         (define pos (nearest-digit-index raw around))
-        (define sess* (parse-session-edit sess pos 1 "93"))
-        (run-parse sess*)
-        (values sess* (string-append (substring raw 0 pos) "93" (substring raw (add1 pos)))))
+        (define doc* (document-edit! doc pos 1 "93"))
+        (run-parse doc*)
+        (values doc* (string-append (substring raw 0 pos) "93" (substring raw (add1 pos)))))
       (void)))))
 
 ;;; --------------------------------------------------------------------------
@@ -98,13 +98,13 @@
 
 (define (profile-single-edit #:width [width 500000])
   (define raw (make-corpus width))
-  (define sess0 (make-parse-session toplevel-descriptor raw))
-  (run-parse sess0)
+  (define doc0 (make-document toplevel-grammar raw))
+  (run-parse doc0)
   (define mid (quotient (string-length raw) 2))
   (define pos (nearest-digit-index raw mid))
   (printf "profiling one isolated edit+reparse at width=~a, offset=~a\n" (string-length raw) pos)
   (define t0 (current-inexact-monotonic-milliseconds))
-  (void (profile-thunk (λ () (run-parse (parse-session-edit sess0 pos 1 "93")))))
+  (void (profile-thunk (λ () (run-parse (document-edit! doc0 pos 1 "93")))))
   (printf "wall time: ~ams\n" (- (current-inexact-monotonic-milliseconds) t0)))
 
 (module+ main

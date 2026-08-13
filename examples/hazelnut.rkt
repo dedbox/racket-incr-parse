@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/langs/hazelnut.rkt
+;; incr-parse/examples/hazelnut.rkt
 ;;
 ;; Stress-test grammar: a minimal Hazelnut-style typed core language.
 ;;
@@ -24,37 +24,24 @@
 ;;         | Expr ("<"|"≡") Expr
 ;;         | "(" Expr ")"
 ;;
-;; There are two sorts in one grammar file with one Pratt engine.
+;; Two sorts, one Pratt engine, declared as one define-operator-grammar
+;; below - what used to be ~90 lines of hand-built nud/led/bp hashes (see
+;; git history) is now a couple of `sort` blocks reading close to the
+;; grammar comment above. Neither sort's table-installation is written by
+;; hand either: parse-expr/parse-type are both generated, and each
+;; installs its own tables via parameterize before delegating to
+;; core/pratt.rkt's shared climbing engine - a lambda's Type annotation
+;; nests correctly by ordinary dynamic extent, no manual save/restore.
 ;;
-;; A program is a single Expr, and Expr embeds Type wherever a lambda names
-;; its parameter's type. Both sorts reuse pratt.rkt's parse-expr/
-;; parse-nud/parse-led without modification. parse-type just installs a second,
-;; independent set of nud/led/bp tables via parameterize, plus its own
-;; memoization rule-id. Without a distinct rule-id, a Type
-;; parse and an Expr parse could go into the same memo bucket if they ever
-;; started at the same token object, and one sort's cached tree could be returned for
-;; the other.
-;;
-;; Nesting works by ordinary parameterize dynamic extent. A lambda's nud calls
-;; parse-type for its annotation, which installs Type's tables for that
-;; sub-parse, then Expr's tables are restored automatically upon return. No
-;; manual save/restore is needed.
-;;
-;; Every nud/led entry here is built from ordinary seq/expect/consume-as, so
-;; recovery uses the same ghost/hole machinery throughout the project. A
-;; missing "." after a lambda's type annotation, a missing "in" in a let, and
-;; a missing ":" in a ternary all recover as a ghost with no crash.
+;; Every nud/led entry here still ultimately compiles to ordinary
+;; seq/expect/consume-as, so recovery uses the same ghost/hole machinery
+;; as everywhere else in this project. A missing "." after a lambda's type
+;; annotation, a missing "in" in a let, and a missing ":" in a ternary all
+;; recover as a ghost with no crash.
 
 (require (prefix-in : incr-lex)
-         rope
-         "../private/ast.rkt"
-         "../private/combinators.rkt"
-         "../private/green.rkt"
-         "../private/hole-ghost.rkt"
-         "../private/memo.rkt"
-         "../private/pratt.rkt"
-         "../private/printer.rkt"
-         "../private/token-stream.rkt")
+         "../grammar.rkt"
+         "../main.rkt")
 
 (provide (all-defined-out))
 
@@ -106,145 +93,65 @@
   #:newline   [Newline])
 
 ;;; --------------------------------------------------------------------------
-;;; Type Tables
+;;; Grammar
 ;;; --------------------------------------------------------------------------
+;;
+;; bp levels only need to preserve relative looseness/tightness within each
+;; sort - loosest to tightest in Expr: ternary(1) < comparison(2) <
+;; additive(3) < multiplicative(4) < application(5). Comparison is
+;; deliberately `infixl`, not the genuinely-non-associative `infix` - a < b
+;; < c parses as (a < b) < c, matching this grammar's original hand-picked
+;; bp values (CMP-RBP = CMP-LBP + 1) exactly; unusual for comparison
+;; operators in most languages, but that's what this grammar already did,
+;; and porting it should not silently change behavior.
+;;
+;; fun/let read close to their own BNF-comment shape (λ Ident : Type .
+;; Expr / let Ident = Expr in Expr) as `form`s - `(: type)` is what makes
+;; a lambda's annotation a genuine Type-sort parse, not another Expr.
+;; Juxtaposition (app) deliberately excludes Fun/Let from #:over, exactly
+;; like the original hand-written APPLICABLE-KINDS did: an unparenthesized
+;; fun/let as a bare application argument reads as ambiguous to a human
+;; even though it wouldn't be to this parser, so it's required to be
+;; parenthesized instead, same as most real languages.
 
-(define type-nud-table
-  (hash 'NumT   (λ (toks) (consume-as 'base toks))
-        'BoolT  (λ (toks) (consume-as 'base toks))
-        'LParen (nud-paren 'LParen 'RParen)))
-
-(define type-led-table
-  (hash 'Arrow (led-infix 'Arrow #:kind 'arrow-type)))
-
-;; Arrow is right-associative: ℕ→ℕ→𝔹 is ℕ→(ℕ→𝔹). right-bp = left-bp - 1 is
-;; the minimum change that lets the SAME operator recur while parsing its
-;; own right operand, under this engine's strict left-bp > min-bp loop
-;; condition - see private/grammar.rkt's define-pratt for where this was
-;; first derived and unit-tested in isolation.
-(define type-bp-table
-  (hash 'Arrow (cons 1 0)))
-
-;; The one place a Type parse begins - swaps in Type's own tables AND its
-;; own memoization rule-id for the dynamic extent of this call, then
-;; parse-expr's own generic climbing engine does the rest.
-(define (parse-type toks min-bp)
-  (parameterize ([current-nud-table type-nud-table]
-                 [current-led-table type-led-table]
-                 [current-bp-table  type-bp-table]
-                 [current-expr-rule-id 'type])
-    (parse-expr toks min-bp)))
-
-;;; --------------------------------------------------------------------------
-;;; Expr Tables
-;;; --------------------------------------------------------------------------
-
-;; λ Ident ":" Type "." Expr
-(define nud-fun
-  (seq 'fun
-       (expect 'Fun)
-       (expect 'Ident)
-       (expect 'Colon)
-       (λ (toks) (parse-type toks 0))
-       (expect 'Dot)
-       (λ (toks) (parse-expr toks 0))))
-
-;; "let" Ident "=" Expr "in" Expr
-(define nud-let
-  (seq 'let
-       (expect 'Let)
-       (expect 'Ident)
-       (expect 'Eq)
-       (λ (toks) (parse-expr toks 0))
-       (expect 'In)
-       (λ (toks) (parse-expr toks 0))))
-
-;; Expr "?" Expr ":" Expr - a hand-written led entry, not one of pratt.rkt's
-;; reusable builders, since none of led-infix/nud-prefix/nud-paren fit a
-;; three-part, two-delimiter shape. Right-associative, lowest precedence -
-;; see TERNARY-BP below.
-(define (led-ternary left toks)
-  (define-values (q toks1) (consume-as 'Question toks))
-  (define-values (then-branch toks2) (parse-expr toks1 0))
-  (define-values (c toks3) ((expect 'Colon) toks2))
-  (define-values (else-branch toks4) (parse-expr toks3 TERNARY-RBP))
-  (values (intern-branch! 'ternary (list left q then-branch c else-branch)) toks4))
-
-;; Application by juxtaposition - no operator token at all, the "operator"
-;; is simply another atom-shaped expression appearing right after a
-;; complete one. Tightest binding power, left-associative (f x y is
-;; (f x) y), via the same led-loop mechanism as any ordinary infix
-;; operator, just without led-infix's own leading consume-as.
-(define (led-apply left toks)
-  (define-values (arg toks*) (parse-expr toks APP-RBP))
-  (values (intern-branch! 'app (list left arg)) toks*))
-
-;; bp numbering, loosest to tightest: ternary < comparison < additive 
-;; multiplicative < application. Ternary's right-bp of 0 is what lets a
-;; nested ternary's own else-branch re-trigger the SAME operator
-;; (right-associative, matching the ?: convention in every C-family
-;; language that has one).
-(define TERNARY-LBP 1)  (define TERNARY-RBP 0)
-(define CMP-LBP      3) (define CMP-RBP      4)
-(define ADD-LBP      5) (define ADD-RBP      6)
-(define MUL-LBP      7) (define MUL-RBP      8)
-(define APP-LBP      9) (define APP-RBP     10)
-
-;; Every atom-starting kind that can stand as a juxtaposed application
-;; argument. Deliberately narrower than the full nud-table key set: an
-;; unparenthesized fun/let as a bare application argument reads as
-;; ambiguous to a human even though it wouldn't be to this parser, so (like
-;; most real languages) it's required to be parenthesized instead.
-(define APPLICABLE-KINDS '(Ident Number True False LParen))
-
-(define expr-nud-table
-  (hash 'Ident   (λ (toks) (consume-as 'var toks))
-        'Number  (λ (toks) (consume-as 'num toks))
-        'True    (λ (toks) (consume-as 'bool toks))
-        'False   (λ (toks) (consume-as 'bool toks))
-        'LParen  (nud-paren 'LParen 'RParen)
-        'Fun     nud-fun
-        'Let     nud-let))
-
-(define expr-led-table
-  (for/fold ([t (hash 'Plus  (led-infix 'Plus)
-                       'Minus (led-infix 'Minus)
-                       'Star  (led-infix 'Star)
-                       'Slash (led-infix 'Slash)
-                       'Lt    (led-infix 'Lt)
-                       'EqEq  (led-infix 'EqEq)
-                       'Question led-ternary)])
-            ([k (in-list APPLICABLE-KINDS)])
-    (hash-set t k led-apply)))
-
-(define expr-bp-table
-  (for/fold ([t (hash 'Question (cons TERNARY-LBP TERNARY-RBP)
-                       'Plus  (cons ADD-LBP ADD-RBP)
-                       'Minus (cons ADD-LBP ADD-RBP)
-                       'Star  (cons MUL-LBP MUL-RBP)
-                       'Slash (cons MUL-LBP MUL-RBP)
-                       'Lt    (cons CMP-LBP CMP-RBP)
-                       'EqEq  (cons CMP-LBP CMP-RBP))])
-            ([k (in-list APPLICABLE-KINDS)])
-    (hash-set t k (cons APP-LBP APP-RBP))))
+(define-operator-grammar hazelnut
+  #:lexer hazelnut-lex #:apply-edit hazelnut-apply-edit
+  #:entry expr
+  (sort expr
+    (atom [Ident 'var] [Number 'num] [True 'bool] [False 'bool])
+    (form fun 'Fun 'Ident 'Colon (: type) 'Dot _)
+    (form let 'Let 'Ident 'Eq _ 'In _)
+    (form paren 'LParen _ 'RParen)
+    (infixl 3 (_ 'Plus _))
+    (infixl 3 (_ 'Minus _))
+    (infixl 4 (_ 'Star _))
+    (infixl 4 (_ 'Slash _))
+    (infixl 2 (_ 'Lt _))
+    (infixl 2 (_ 'EqEq _))
+    (infixr 1 ternary (_ 'Question _ 'Colon _))
+    (infixl 5 (_ _) #:over (Ident Number True False LParen)))
+  (sort type
+    (atom [NumT 'base] [BoolT 'base])
+    (infixr 1 arrow-type (_ 'Arrow _))
+    (form paren 'LParen _ 'RParen)))
 
 ;;; --------------------------------------------------------------------------
 ;;; AST
 ;;; --------------------------------------------------------------------------
-
-;; This grammar never requires arith.rkt/sexpr.rkt/toplevel.rkt, so it can't
-;; rely on any of THEIR elaborator registrations either - ast.rkt's registry
-;; is one shared table keyed by symbol, populated only by whichever grammar
-;; modules happen to have been loaded into the same process, and that's not
-;; something this file's own correctness should depend on. Every kind this
-;; grammar actually produces gets its own registration here, even 'paren
-;; and 'binop, which arith.rkt also happens to use for the exact same shape.
 ;;
-;; 'base (NumT/BoolT) needs no elaborator at all: consume-as makes it a leaf,
-;; not a branch, so ast.rkt's built-in green-token case already covers it -
-;; the elaborated leaf's own .kind is the underlying lexer kind (NumT or
-;; BoolT), not the grammar-level 'base label, exactly like 'atom in
-;; langs/arith.rkt never needing one either.
+;; This grammar never requires arith.rkt/sexpr.rkt/toplevel.rkt, so it
+;; can't rely on any of THEIR elaborator registrations either -
+;; elaborate.rkt's registry is one shared table keyed by symbol, populated
+;; only by whichever grammar modules happen to have been loaded into the
+;; same process, and that's not something this file's own correctness
+;; should depend on. Every kind this grammar actually produces gets its
+;; own registration here, even 'paren and 'binop, which arith.rkt also
+;; happens to use for the exact same shape.
+;;
+;; var/num/bool/base need no elaborator registration at all - they're
+;; leaves (consume-as, not a branch), so elaborate.rkt's built-in
+;; green-token case already covers them, reading the underlying LEXER
+;; kind (NumT/BoolT/Number/...), not this grammar's own CST-level tag.
 
 (define-elaborator paren (branch)
   (elaborate (cadr (green-branch-children branch))))
@@ -284,51 +191,18 @@
   (define c (green-branch-children branch))
   (ast-app (elaborate (car c)) (elaborate (cadr c))))
 
-;; var/num/bool need no elaborator registration at all - they're leaves
-;; (consume-as, not a branch), so ast.rkt's built-in green-token case
-;; already covers them.
-
 ;;; --------------------------------------------------------------------------
 ;;; Entry Point
 ;;; --------------------------------------------------------------------------
 
+;; A one-shot "give me a tree from a string" convenience - runtime usage
+;; (creates a document, parses it), so it reaches for ../main.rkt rather
+;; than growing ../grammar.rkt a runtime concept, same as arith.rkt/sexpr.rkt.
 (define (parse-hazelnut-string str)
-  (define sess (:make-session hazelnut-lex hazelnut-apply-edit string-rope-ropeable str))
-  (define toks (tokens->stream (:session->tokens-list sess)))
-  (define-values (tree remaining)
-    (parameterize ([current-nud-table expr-nud-table]
-                   [current-led-table expr-led-table]
-                   [current-bp-table  expr-bp-table]
-                   [current-expr-rule-id 'expr])
-      (parse-expr toks 0)))
-  (unless (eq? (peek-kind remaining) 'incr-lex:eof)
-    (error 'parse-hazelnut-string "parser did not consume the full token stream"))
-  tree)
+  (document-tree (document-parse! (make-document hazelnut-grammar str))))
 
 (define (elaborate-hazelnut-string str)
   (elaborate (parse-hazelnut-string str)))
-
-;; The bound grammar descriptor for this file. The entry point is Expr. Type
-;; is only ever reached internally, via parse-type, wherever an Expr
-;; production expects one. #:with-setup installs Expr's tables and
-;; expr-rule-id. parse-type installs Type's own tables for its dynamic extent
-;; regardless, but setting expr-rule-id here too keeps this descriptor's setup
-;; a complete, self-contained mirror of parse-hazelnut-string's parameterize
-;; block below, instead of a partial one that relies on the default
-;; coincidentally being 'expr.
-(define (hazelnut-with-setup run)
-  (λ (toks)
-    (parameterize ([current-nud-table expr-nud-table]
-                   [current-led-table expr-led-table]
-                   [current-bp-table  expr-bp-table]
-                   [current-expr-rule-id 'expr])
-      (run toks))))
-
-(define hazelnut-descriptor
-  (make-grammar-descriptor hazelnut-lex hazelnut-apply-edit
-                           (λ (toks) (parse-expr toks 0))
-                           #:with-setup hazelnut-with-setup
-                           #:ropeable string-rope-ropeable))
 
 ;;; --------------------------------------------------------------------------
 ;;; Tests
@@ -337,7 +211,7 @@
 (module+ test
   (require racket/list
            rackunit
-           incr-lex/engine)
+           rope)
 
   (define (check-round-trip src)
     (check-equal? (green->source (parse-hazelnut-string src)) src))
@@ -350,7 +224,7 @@
 
   (test-case "round-trip: recovery cases"
     (check-round-trip "λx:ℕ x")               ; missing "." -> ghost
-    (check-round-trip "let x = 1 x + 1")      ; missing "▸" -> ghost (round-trip
+    (check-round-trip "let x = 1 x + 1")      ; missing "in" -> ghost (round-trip
                                               ; holds regardless of how the
                                               ; surrounding tokens end up
                                               ; grouped - application is
@@ -365,8 +239,7 @@
     (define ty (list-ref (green-branch-children tree) 3))
     ;; 'arrow-type, not 'binop - Type's own Arrow led is kept distinct from
     ;; Expr's arithmetic binops precisely so the two sorts can't collide in
-    ;; ast.rkt's shared, symbol-keyed elaborator registry. See led-infix's
-    ;; #:kind argument.
+    ;; elaborate.rkt's shared, symbol-keyed elaborator registry.
     (check-eq? (green-tree-kind ty) 'arrow-type)
     (define-values (l op r) (apply values (green-branch-children ty)))
     (check-eq? (green-tree-kind l) 'base)
@@ -405,17 +278,19 @@
 
   (test-case "incremental reparse: an untouched deeply-nested sibling survives an edit"
     (define src "λx:ℕ.((x + 1) * (x + 2)) + x")
-    (define sess1 (make-parse-session hazelnut-descriptor src))
-    (define tree1 (parse-session-tree (parse-session-run sess1)))
+    (define sess (make-session))
+    (session-install-grammar! sess 'hazelnut hazelnut-grammar)
+    (session-open! sess 'hazelnut "doc-1" src)
+    (define tree1 (document-tree (session-document sess "doc-1")))
     ;; offset 11 is the "1" inside "x + 1" - replace it with "11"
-    (define sess2 (parse-session-edit sess1 11 1 "11"))
-    (define tree2 (parse-session-tree (parse-session-run sess2)))
+    (define doc2 (session-edit! sess "doc-1" 11 1 "11"))
+    (define tree2 (document-tree doc2))
     (check-equal? (green->source tree2) "λx:ℕ.((x + 11) * (x + 2)) + x")
     (define (find-plus-2 t)
       (cond [(and (green-branch? t) (eq? (green-tree-kind t) 'binop)
                   (let ([r (caddr (green-branch-children t))])
                     (and (eq? (green-tree-kind r) 'num)
-                         (equal? (rope->string (token-payload (green-token-token r))) "2"))))
+                         (equal? (rope->string (:token-payload (green-token-token r))) "2"))))
              t]
             [(green-branch? t) (ormap find-plus-2 (green-branch-children t))]
             [else #f]))
@@ -423,7 +298,7 @@
     (define p2 (find-plus-2 tree2))
     (check-not-false p1)
     (check-eq? p1 p2)
-    (parse-session-unload! sess2)))
+    (session-close! sess "doc-1")))
 
 (module+ main
   (for ([src (list "λf:ℕ→ℕ.λx:ℕ.f (f x)"

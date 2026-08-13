@@ -192,10 +192,23 @@
   (define (compile-sort-clause clause sort-name)
     (syntax-parse clause
       #:datum-literals (atom form infixl infixr infix prefix postfix)
-      ;; ---- atom: a leaf, wrapped uniformly as grammar-level 'atom -------
-      [(atom kind:id ...)
-       (values (for/list ([k (in-list (attribute kind))])
-                 (cons k #'(λ (toks) (consume-as 'atom toks))))
+      ;; ---- atom: a leaf. Bare `Kind` tags it uniformly as grammar-level
+      ;; 'atom (arith.rkt's convention - the lexer-level kind, e.g. Number
+      ;; vs Ident, stays recoverable via the wrapped token itself, so a
+      ;; shared tag loses no information an elaborator would need).
+      ;; `[Kind 'tag]` overrides the tag per-kind, for a grammar that wants
+      ;; its CST to distinguish e.g. variables from literals by tag alone
+      ;; (hazelnut.rkt's Ident -> 'var, Number -> 'num, True/False -> 'bool).
+      ;; The two forms freely mix within one atom declaration.
+      [(atom atom-clause ...)
+       #:do [(define pairs
+               (for/list ([ac (in-list (attribute atom-clause))])
+                 (syntax-parse ac
+                   #:literals (quote)
+                   [k:id (cons #'k #''atom)]
+                   [(k:id (quote tag:id)) (cons #'k #`(quote tag))])))]
+       (values (for/list ([p (in-list pairs)])
+                 (cons (car p) #`(λ (toks) (consume-as #,(cdr p) toks))))
                '() '())]
 
       ;; ---- form: a standalone, non-operator, leading-token production --
@@ -496,6 +509,22 @@
     (define c (list-ref (green-branch-children tree) 3))
     (check-true (ghost? c))
     (check-eq? (ghost-of c) 'Colon))
+
+  ;; Per-kind atom tags, mixed with the plain bare-kind form in one
+  ;; declaration - both shapes coexisting, as hazelnut.rkt's port needs.
+  (define-operator-grammar tagged
+    #:lexer (λ (x) x) #:apply-edit (λ (x . _) x)
+    #:entry te
+    (sort te
+      (atom Number [Ident 'var] [True 'bool] [False 'bool])))
+
+  (test-case "atom: [Kind 'tag] overrides the grammar-level tag per kind, bare Kind still defaults to 'atom"
+    (define-values (v _r1) (parse-te (toks 'Ident "x") 0))
+    (check-eq? (green-tree-kind v) 'var)
+    (define-values (n _r2) (parse-te (toks 'Number "1") 0))
+    (check-eq? (green-tree-kind n) 'atom)
+    (define-values (b _r3) (parse-te (toks 'True "t") 0))
+    (check-eq? (green-tree-kind b) 'bool))
 
   ;; postfix, and cross-sort embedding on an operator's RIGHT side (not
   ;; just inside a form) - a JS-style assignment shape, pattern = expr,
