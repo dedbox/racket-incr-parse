@@ -514,16 +514,16 @@
 
   (test-case "postfix: consumes the trailing token, no further operand parsed"
     (define-values (tree rest)
-      (parse-ms-expr (toks 'Number "5" 'Bang "!") 0))
+      (parse-ms-expr (toks 'Number "5" '! "!") 0))
     (check-eq? (green-tree-kind tree) 'unop)
     (define-values (n bang) (apply values (green-branch-children tree)))
     (check-eq? (green-tree-kind n) 'atom)
-    (check-eq? (lex:token-kind (green-token-token bang)) 'Bang)
+    (check-eq? (lex:token-kind (green-token-token bang)) '!)
     (check-eq? (peek-kind rest) 'incr-lex:eof))
 
   (test-case "cross-sort embedding on an operator's right side: RHS parses via a DIFFERENT sort's own table"
     (define-values (tree _r)
-      (parse-ms-expr (toks 'Ident "x" 'Eq "=" 'Number "1" 'Plus "+" 'Number "2") 0))
+      (parse-ms-expr (toks 'Ident "x" '= "=" 'Number "1" 'Plus "+" 'Number "2") 0))
     (check-eq? (green-tree-kind tree) 'assign)
     (define-values (lhs eq rhs) (apply values (green-branch-children tree)))
     (check-eq? (green-tree-kind lhs) 'atom)
