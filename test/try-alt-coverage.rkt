@@ -4,7 +4,7 @@
 ;;
 ;; Exercises try/alt for real, inside an actual nested, memoized parse. This
 ;; file is a rough fixture, not a shipped grammar. It registers no lexer and
-;; no AST elaborators, and nothing under langs/ depends on it.
+;; no AST elaborators, and nothing under examples/ depends on it.
 ;;
 ;; The toy grammar:
 ;;
@@ -24,12 +24,12 @@
 
 (require (prefix-in lex: incr-lex)
          rope
-         "private/combinators.rkt"
-         "private/green.rkt"
-         "private/hole-ghost.rkt"
-         "private/memo.rkt"
-         "private/printer.rkt"
-         "private/token-stream.rkt")
+         "../core/combinators.rkt"
+         "../core/green.rkt"
+         "../core/hole-ghost.rkt"
+         "../core/memo.rkt"
+         "../core/printer.rkt"
+         "../core/token-stream.rkt")
 
 (provide (all-defined-out))
 

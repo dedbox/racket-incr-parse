@@ -1,8 +1,8 @@
 #lang racket/base
 
-;; incr-parse/langs/sexpr.rkt
+;; incr-parse/examples/sexpr.rkt
 ;;
-;; Toy grammar #1: parenthesized s-expressions.
+;; Example grammar #1: parenthesized s-expressions.
 ;;
 ;; Grammar:
 ;;   program := sexpr*
@@ -20,16 +20,21 @@
 ;;   - a list missing its closing paren -> ghost RParen, no token
 ;;     consumed, list closes cleanly at EOF or wherever the enclosing
 ;;     context resumes
+;;
+;; Two requires cover everything: incr-lex for the lexer, ../grammar.rkt
+;; for everything else needed to write a parser and expose it as a
+;; `grammar` value. Compare against this file's own git history for what
+;; seven separate "../private/*.rkt" requires used to look like.
+;;
+;; ../main.rkt is required too, but ONLY for parse-sexpr-string below - a
+;; one-shot "give me a tree from a string" convenience wrapper is runtime
+;; usage (it creates a document and parses it), not grammar-authoring, so
+;; it reaches for the runtime API rather than grammar.rkt growing runtime
+;; concepts it shouldn't have.
 
 (require (prefix-in : incr-lex)
-         rope
-         "../private/ast.rkt"
-         "../private/combinators.rkt"
-         "../private/green.rkt"
-         "../private/hole-ghost.rkt"
-         "../private/memo.rkt"
-         "../private/printer.rkt"
-         "../private/token-stream.rkt")
+         "../grammar.rkt"
+         "../main.rkt")
 
 (provide (all-defined-out))
 
@@ -38,7 +43,7 @@
 ;;; --------------------------------------------------------------------------
 
 ;; Extra characters a Symbol may start or continue with, beyond alpha/alnum -
-;; enough for a toy grammar.
+;; enough for an example grammar.
 (define symbol-extra-char (:char-set "+-*/<>=!?_.:"))
 
 (:define-tokens sexpr-tokens
@@ -71,10 +76,10 @@
 (define (program-stop? kind)
   (eq? kind 'incr-lex:eof))
 
-;; atom/list wrap Symbol and Number tokens under one grammar-level
-;; 'atom kind - the lexer-level distinction (Symbol vs Number) stays
-;; recoverable later via the wrapped token's own token-kind; see
-;; consume-as's comment in combinators.rkt.
+;; atom/list wrap Symbol and Number tokens under one grammar-level 'atom
+;; kind - the lexer-level distinction (Symbol vs Number) stays recoverable
+;; later via the wrapped token's own token-kind; see consume-as's comment
+;; in core/combinators.rkt.
 (define (match-peek toks)
   (case (peek-kind toks)
     [(LParen)        (parse-list toks)]
@@ -116,35 +121,29 @@
   (ast-program (map elaborate (green-branch-children branch))))
 
 ;;; --------------------------------------------------------------------------
-;;; Entry point
+;;; Grammar value - what a session actually installs (see ../main.rkt)
 ;;; --------------------------------------------------------------------------
 
-;; Non-incremental for now, per the agreed build order - lexes the whole
-;; string via a fresh incr-lex session, then parses the full token list in one
-;; pass.
+;; RD-only, so #:setup stays at its identity default - there are no Pratt
+;; tables to install.
+(define sexpr-grammar
+  (make-grammar #:lexer sexpr-lex #:apply-edit sexpr-apply-edit #:start parse-program))
+
+;; A convenience one-shot entry point for callers that want a tree from a
+;; string directly, without going through a session at all - not
+;; incremental, and not needed for incremental use (see the module+ test
+;; below for that).
 (define (parse-sexpr-string str)
-  (define sess (:make-session sexpr-lex sexpr-apply-edit string-rope-ropeable str))
-  (define toks (tokens->stream (:session->tokens-list sess)))
-  (define-values (tree remaining) (parse-program toks))
-  (unless (eq? (peek-kind remaining) 'incr-lex:eof)
-    (error 'parse-sexpr-string "parser did not consume the full token stream"))
-  tree)
+  (define doc (document-parse! (make-document sexpr-grammar str)))
+  (document-tree doc))
 
 (define (elaborate-sexpr-string str)
   (elaborate (parse-sexpr-string str)))
 
-;; The bound grammar descriptor for this file, for use with
-;; make-parse-session/parse-session-run/workspace-open!. Since sexpr.rkt is
-;; RD-only and therefore installs no Pratt tables, we do not need to specify
-;; #:with-setup.
-(define sexpr-descriptor
-  (make-grammar-descriptor sexpr-lex sexpr-apply-edit parse-program
-                           #:ropeable string-rope-ropeable))
-
 (module+ test
   (require racket/list
            rackunit
-           incr-lex/engine)
+           rope)
 
   (define (check-round-trip src)
     (check-equal? (green->source (parse-sexpr-string src)) src))
@@ -194,26 +193,25 @@
                         (green-branch-children elements)))
     (check-equal? kinds '(Symbol Number)))
 
-  (test-case "incremental reparse: untouched subtree is eq? across an edit"
-    (define sess1
-      (make-parse-session
-       sexpr-descriptor
-       "(quux (bar 1 2) baz)")) ; was (foo ...) - collided with an earlier test-case's fixture
-    (define tree1 (parse-session-tree (parse-session-run sess1)))
-    ;; offset 10 is the "1" inside (bar 1 2) - replace it with "11"
-    (define sess2 (parse-session-edit sess1 11 1 "11"))
-    (define sess2* (parse-session-run sess2))
-    (define tree2 (parse-session-tree sess2*))
+  (test-case "incremental reparse via a session: untouched subtree is eq? across an edit"
+    (define sess (make-session))
+    (session-install-grammar! sess 'sexpr sexpr-grammar)
+    ;; was (foo ...) - collided with an earlier test-case's fixture
+    (session-open! sess 'sexpr "doc-1" "(quux (bar 1 2) baz)")
+    (define tree1 (document-tree (session-document sess "doc-1")))
+    ;; offset 11 is the "1" inside (bar 1 2) - replace it with "11"
+    (define doc2 (session-edit! sess "doc-1" 11 1 "11"))
+    (define tree2 (document-tree doc2))
     (check-equal? (green->source tree2) "(quux (bar 11 2) baz)")
     (define (find-baz t)
       (cond [(and (green-token? t)
-                  (equal? (rope->string (token-payload (green-token-token t))) "baz")) t]
+                  (equal? (rope->string (:token-payload (green-token-token t))) "baz")) t]
             [(green-branch? t) (ormap find-baz (green-branch-children t))]
             [else #f]))
     (define baz1 (find-baz tree1))
     (define baz2 (find-baz tree2))
     (check-eq? baz1 baz2)
-    (parse-session-unload! sess2*))
+    (session-close! sess "doc-1"))
 
   (test-case "AST: nested list elaborates to nested ast-list, parens dropped"
     (define ast (elaborate-sexpr-string "(foo (bar 1) baz)"))

@@ -1,6 +1,6 @@
 #lang racket
 
-;; private/ast.rkt
+;; core/elaborate.rkt
 ;;
 ;; CST → AST elaboration pass.
 ;;

@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/span.rkt
+;; incr-parse/core/span.rkt
 ;;
 ;; A `span` is an (offset, width) pair. Its meaning is context-dependent:
 ;;   - Attached to a diagnostic on a Green node (hole-ghost.rkt): the offset

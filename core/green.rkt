@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/green.rkt
+;; incr-parse/core/green.rkt
 ;;
 ;; Green Trees
 ;;

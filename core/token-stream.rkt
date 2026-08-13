@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/token-stream.rkt
+;; incr-parse/core/token-stream.rkt
 ;;
 ;; Parser's input representation. A vector of tokens plus an integer position,
 ;; replacing the earlier (listof token?) representation.

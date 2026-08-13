@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/red.rkt
+;; incr-parse/core/red.rkt
 ;;
 ;; Red Tree - lazy, ephemeral positional view over a Green tree
 ;;

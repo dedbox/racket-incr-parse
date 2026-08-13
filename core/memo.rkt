@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/memo.rkt
+;; incr-parse/core/memo.rkt
 ;;
 ;; Per-rule memoization, keyed on eq?-identity of the incr-lex token a rule
 ;; started at plus a rule-specific extra key, PLUS explicit, offset-based
@@ -34,7 +34,8 @@
 ;; (rule-id, token, extra-key) triple was found during the current pass and
 ;; resets at the start of every fresh top-level parse via
 ;; parse-cache-begin-pass!, which must be called at the top of anything that
-;; starts a parse pass. parse-session-run does this, and anything that
+;; starts a parse pass. document-parse! (core/session.rkt) does this, and
+;; anything that
 ;; bypasses it (by calling memo-ref!/memoize directly against a shared cache
 ;; across what should be two separate passes) also needs to call it
 ;; explicitly, or a later pass will see the earlier pass's stale offsets and
@@ -69,9 +70,7 @@
 
 (require (prefix-in lex: incr-lex)
          racket/list
-         rope
          "green.rkt"
-         "red.rkt"
          "token-stream.rkt")
 
 (provide (all-defined-out))
@@ -239,108 +238,6 @@
       (when by-key (hash-remove! by-key (entry-ref-key er))))
     (bucket-index-remove! cache er)))
 
-;;; --------------------------------------------------------------------------
-;;; Grammar Descriptor
-;;; --------------------------------------------------------------------------
-;;
-;; A grammar-descriptor contains everything a session needs to run a parse,
-;; bound once during session creation.
-
-;; lex-fn/apply-edit-fn : handed straight to incr-lex:make-session /
-;;   incr-lex:session-edit.
-;; entry-point : Parser - (token-stream? -> (values green-tree? token-stream?)),
-;; with-setup : Parser -> Parser - wraps entry-point so whatever
-;;   parameterization the grammar needs is installed automatically on every run.
-;; ropeable : given straight to incr-lex:make-session as ρ-src. Every
-;;   grammar in this project uses string-rope-ropeable; kept as a field
-;;   (not hardcoded) so a grammar reading from something other than a
-;;   plain string isn't blocked by this layer.
-(struct grammar-descriptor
-  (lex-fn apply-edit-fn entry-point with-setup ropeable)
-  #:transparent)
-
-(define (make-grammar-descriptor lex-fn apply-edit-fn entry-point
-                                 #:with-setup [with-setup (λ (p) p)]
-                                 #:ropeable   [ropeable string-rope-ropeable])
-  (grammar-descriptor lex-fn apply-edit-fn entry-point with-setup ropeable))
-
-;;; --------------------------------------------------------------------------
-;;; Session
-;;; --------------------------------------------------------------------------
-;;
-;; Contains a document's lex state, its private cache, the descriptor it was
-;; created with, and its current Green tree.
-;;
-;; Never shared across documents.
-
-;; tree : (or/c green-tree? #f) - #f until the first parse-session-run, and
-;;   reset to #f by parse-session-edit.
-(struct parse-session (lex-session cache descriptor tree) #:transparent)
-
-(define (make-parse-session descriptor raw-chunk)
-  (parse-session (lex:make-session (grammar-descriptor-lex-fn descriptor)
-                                   (grammar-descriptor-apply-edit-fn descriptor)
-                                   (grammar-descriptor-ropeable descriptor)
-                                   raw-chunk)
-                 (make-parse-cache)
-                 descriptor
-                 #f))
-
-(define (parse-session-tokens sess)
-  (lex:session->tokens-list (parse-session-lex-session sess)))
-
-;; Runs the session's descriptor's entry-point, through its with-setup
-;; wrapper, against its current tokens and with its cache installed, so calls
-;; to memoize/memo-ref! during parsing reuse entries from prior parses of this
-;; session and write new ones back into it. Returns a new parse-session with
-;; `tree` filled in.
-(define (parse-session-run sess)
-  (parse-cache-begin-pass! (parse-session-cache sess))
-  (define descriptor (parse-session-descriptor sess))
-  (define run ((grammar-descriptor-with-setup descriptor)
-               (grammar-descriptor-entry-point descriptor)))
-  (parameterize ([current-parse-cache (parse-session-cache sess)]
-                 [current-parse-offset (box 0)])
-    (define-values (tree rest) (run (tokens->stream (parse-session-tokens sess))))
-    (struct-copy parse-session sess [tree tree])))
-
-;; Applies a text edit via incr-lex's session-edit and returns a new
-;; parse-session value. Every stale entry is invalidated before swapping in
-;; the new lex-session. The lex-session field is updated, but the cache object
-;; is the same instance, unchanged, so surviving entries are still reusable.
-;; Marks tree as stale (#f) until the next parse-session-run.
-(define (parse-session-edit sess start old-len new-chunk)
-  (parse-cache-invalidate! (parse-session-cache sess) start (+ start old-len))
-  (struct-copy parse-session sess
-               [lex-session (lex:session-edit (parse-session-lex-session sess)
-                                              start old-len new-chunk)]
-               [tree #f]))
-
-;; Explicit, deterministic disposal for a server managing many open documents.
-;; Drops this session's entries immediately rather than waiting on GC.
-(define (parse-session-unload! sess)
-  (hash-clear! (parse-cache-table (parse-session-cache sess)))
-  (hash-clear! (parse-cache-spans (parse-session-cache sess)))
-  (hash-clear! (parse-cache-pass-seen (parse-session-cache sess)))
-  (void))
-
-;; Fails if the session has never been run, which means there's no tree yet to
-;; root a Red view on.
-(define (parse-session-red-root sess)
-  (define tree (parse-session-tree sess))
-  (unless tree
-    (error 'parse-session-red-root
-           "session has no tree yet - call parse-session-run first"))
-  (red-root tree))
-
-(define (parse-session-find-at sess target)
-  (red-find-at (parse-session-red-root sess) target))
-
-;; Returns every lexical and syntactic diagnostic anywhere in the session's
-;; current tree, with absolute offsets and in document order.
-(define (parse-session-diagnostics sess)
-  (red-tree-diagnostics (parse-session-red-root sess)))
-
 (module+ test
   (require rackunit)
 
@@ -419,7 +316,7 @@
       (memo-ref! 'r (tokens->stream (list tok)) 0 (box-updater 'a)))
     (check-equal? (unbox calls) 2))
 
-  (test-case "parse-session-unload! clears only that session's cache"
+  (test-case "clearing a cache's table directly forces every rule to recompute"
     (define calls (box 0))
     (define p (memoize 'r (λ (toks)
                             (set-box! calls (add1 (unbox calls)))
@@ -603,7 +500,7 @@
         tb))
     (define A+ (mk-tok 'K "aaa"))  ; width 3, was 1
     (parse-cache-invalidate! cache 0 1)  ; A's old span only
-    (parse-cache-begin-pass! cache)      ; a fresh top-level parse, same as parse-session-run does
+    (parse-cache-begin-pass! cache)      ; a fresh top-level parse, same as document-parse! does
     (define tree-b-2
       (parameterize ([current-parse-cache cache] [current-parse-offset (box 0)])
         (define-values (_a r1) (leaf (tokens->stream (list A+ B))))

@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/printer.rkt
+;; incr-parse/core/printer.rkt
 ;;
 ;; Two printers over the same Green tree:
 ;;   green->source : exact bidirectional reproduction of the original text -
@@ -99,7 +99,7 @@
                                    "; "))))
 
 ;; incr-lex's own diagnostic struct has the same (severity message offset
-;; width) shape as ours (see private/span.rkt notes), so this is intentionally
+;; width) shape as ours (see core/span.rkt notes), so this is intentionally
 ;; near-identical to diagnostics->debug-suffix above We keep them separate
 ;; because the two diagnostic sources (lexer-level on raw tokens vs.
 ;; hole-level on parse recovery) are conceptually distinct and I'd rather not

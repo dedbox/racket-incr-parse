@@ -1,10 +1,13 @@
 #lang racket/base
 
-;; incr-parse/langs/arith.rkt
+;; incr-parse/examples/arith.rkt
 ;;
-;; Toy grammar #2: arithmetic expressions with real operator precedence.
-;; Exists to validate the RD<->Pratt handoff protocol. See private/pratt.rkt
-;; for the shared mechanism this grammar is entirely table data against.
+;; Example grammar #2: arithmetic expressions with real operator
+;; precedence, built via define-operator-grammar - the whole Grammar
+;; Tables section of this file used to be four hand-built hash literals
+;; and a hand-picked binding-power scheme (see git history). Every
+;; nud/led/bp table below is now generated; the words "nud", "led", and
+;; "bp" don't appear anywhere in this file.
 ;;
 ;; Grammar:
 ;;   program := expr*
@@ -15,15 +18,8 @@
 ;;            | expr ("*" | "/") expr   (left-assoc, binds tighter than + -)
 
 (require (prefix-in : incr-lex)
-         rope
-         "../private/ast.rkt"
-         "../private/combinators.rkt"
-         "../private/green.rkt"
-         "../private/hole-ghost.rkt"
-         "../private/memo.rkt"
-         "../private/pratt.rkt"
-         "../private/printer.rkt"
-         "../private/token-stream.rkt")
+         "../grammar.rkt"
+         "../main.rkt")
 
 (provide (all-defined-out))
 
@@ -54,32 +50,31 @@
   #:newline   [Newline])
 
 ;;; --------------------------------------------------------------------------
-;;; Grammar Tables
-;;; --------------------------------------------------------------------------
+;;; Grammar - one sort (expr), declared by fixity + Agda-style precedence.
+;;; Levels only need to preserve RELATIVE looseness/tightness - the DSL
+;;; derives actual binding powers (see core/operator-grammar.rkt).
+;;; Loosest to tightest: add(1) < mul(2) < unary-minus(3).
+;;; ---------------------------------------------------------------------
+;;; Also produces arith-grammar (a ready `grammar` value - see
+;;; ../main.rkt), arith-nud-table/-led-table/-bp-table, and an explicitly
+;;; bound parse-expr, none of which this file writes by hand.
 
-;; Standard binding-power-pair scheme: (left-bp . right-bp), right-bp =
-;; left-bp + 1 encodes left-associativity (see pratt.rkt's header comment).
-;; Star/Slash's right-bp (4) sits below unary minus's fixed bp (5), so "-2*3"
-;; parses as "(-2)*3", the usual convention.
-(define arith-bp-table
-  (hash 'Plus  (cons 1 2)
-        'Minus (cons 1 2)
-        'Star  (cons 3 4)
-        'Slash (cons 3 4)))
-
-(define UNARY-MINUS-BP 5)
-
-(define arith-nud-table
-  (hash 'Number (λ (toks) (consume-as 'atom toks))
-        'Ident  (λ (toks) (consume-as 'atom toks))
-        'Minus  (nud-prefix 'Minus UNARY-MINUS-BP)
-        'LParen (nud-paren 'LParen 'RParen)))
-
-(define arith-led-table
-  (hash 'Plus  (led-infix 'Plus)
-        'Minus (led-infix 'Minus)
-        'Star  (led-infix 'Star)
-        'Slash (led-infix 'Slash)))
+(define-operator-grammar arith
+  #:lexer arith-lex #:apply-edit arith-apply-edit
+  #:entry expr
+  (sort expr
+    (atom Number Ident)
+    (infixl 1 (_ 'Plus _))
+    (infixl 1 (_ 'Minus _))
+    (infixl 2 (_ 'Star _))
+    (infixl 2 (_ 'Slash _))
+    ;; Kind defaults to 'unop, matching the elaborator below - see
+    ;; core/operator-grammar.rkt's prefix clause.
+    (prefix 3 ('Minus _))
+    ;; Kind defaults to 'binop for the plain 2-slot infix shapes above;
+    ;; 'paren here is the form's own required name, matching the
+    ;; elaborator below exactly the same way it always had to.
+    (form paren 'LParen _ 'RParen)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Top Level: program := expr*
@@ -122,35 +117,19 @@
 ;;; Entry Point
 ;;; --------------------------------------------------------------------------
 
+;; A one-shot "give me a tree from a string" convenience - runtime usage
+;; (creates a document, parses it), so it reaches for ../main.rkt rather
+;; than growing ../grammar.rkt a runtime concept. parse-program, not
+;; arith-grammar's own #:start (parse-expr), since a whole file is
+;; expr*, not one bare expr.
+(define arith-program-grammar
+  (make-grammar #:lexer arith-lex #:apply-edit arith-apply-edit #:start parse-program))
+
 (define (parse-arith-string str)
-  (define sess (:make-session arith-lex arith-apply-edit string-rope-ropeable str))
-  (define toks (tokens->stream (:session->tokens-list sess)))
-  (define-values (tree remaining)
-    (parameterize ([current-nud-table arith-nud-table]
-                   [current-led-table arith-led-table]
-                   [current-bp-table  arith-bp-table])
-      (parse-program toks)))
-  (unless (eq? (peek-kind remaining) 'incr-lex:eof)
-    (error 'parse-arith-string "parser did not consume the full token stream"))
-  tree)
+  (document-tree (document-parse! (make-document arith-program-grammar str))))
 
 (define (elaborate-arith-string str)
   (elaborate (parse-arith-string str)))
-
-;; The bound grammar descriptor for this file. #:with-setup installs arith's
-;; nud/led/bp tables for the dynamic extent of every parse-session-run against
-;; a session created from this descriptor.
-(define (arith-with-setup run)
-  (λ (toks)
-    (parameterize ([current-nud-table arith-nud-table]
-                   [current-led-table arith-led-table]
-                   [current-bp-table  arith-bp-table])
-      (run toks))))
-
-(define arith-descriptor
-  (make-grammar-descriptor arith-lex arith-apply-edit parse-program
-                            #:with-setup arith-with-setup
-                            #:ropeable string-rope-ropeable))
 
 ;;; --------------------------------------------------------------------------
 ;;; Tests
@@ -222,18 +201,3 @@
     (check-true (ast-unop? expr))
     (check-eq? (ast-unop-op expr) 'Minus)
     (check-true (ast-binop? (ast-unop-operand expr)))))
-
-(module+ main
-  (for ([src (list "1 + 2 * 3"
-                    "(1 + 2) * 3"
-                    "-x * (y - 1)"
-                    "1 +"                ; missing rhs
-                    "(1 + 2"             ; missing RParen
-                    "1 @ 2"              ; unrecognized token
-                    "1 2"                ; two juxtaposed atoms - see notes
-                    "(1 2)")])           ; juxtaposed INSIDE parens - see notes
-    (define tree (parse-arith-string src))
-    (printf "--- source ---\n~a\n" src)
-    (printf "--- debug tree ---\n~a\n" (green->debug-string tree))
-    (printf "--- round-trip ~a ---\n\n"
-            (if (equal? (green->source tree) src) "OK" "MISMATCH"))))

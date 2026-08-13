@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/hole-ghost.rkt
+;; incr-parse/core/hole-ghost.rkt
 ;;
 ;; Hole and Ghost Node Kinds
 ;;
@@ -21,7 +21,7 @@
 ;; severity : 'error | 'warning | 'info
 ;; message  : string?
 ;; span     : span? - RELATIVE to the start of the green-tree this diagnostic is
-;;    diagnostic is attached to (see private/span.rkt).
+;;    diagnostic is attached to (see core/span.rkt).
 (struct diagnostic (severity message span) #:transparent)
 
 ;; -----------------------------------------------------------------------------

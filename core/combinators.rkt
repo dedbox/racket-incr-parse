@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/combinators.rkt
+;; incr-parse/core/combinators.rkt
 ;;
 ;; The no-fail combinator core.
 ;;

@@ -1,6 +1,6 @@
 #lang racket/base
 
-;; incr-parse/private/pratt.rkt
+;; incr-parse/core/pratt.rkt
 ;;
 ;; Generic Pratt/precedence-climbing expression parser. Shares the
 ;; exact Parser signature from combinators.rkt
