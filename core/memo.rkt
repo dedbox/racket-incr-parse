@@ -70,6 +70,7 @@
 
 (require (prefix-in lex: incr-lex)
          racket/list
+         rope
          "green.rkt"
          "token-stream.rkt")
 

@@ -226,7 +226,7 @@
 ;;; --------------------------------------------------------------------------
 
 (module+ test
-  (require rackunit
+  (require (except-in rackunit fail)
            racket/set
            (prefix-in : incr-lex)
            "combinators.rkt"

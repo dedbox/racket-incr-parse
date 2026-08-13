@@ -4,7 +4,7 @@
 
 @(require scribble/example
           racket/sandbox
-          @for-label[incr-lex
+          @for-label[(prefix-in lex: incr-lex)
                      incr-parse
                      racket/base
                      racket/contract

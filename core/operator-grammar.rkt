@@ -308,15 +308,12 @@
   ;; declarations that accidentally reuse the same operator token, or an
   ;; `atom` and a `form` both claiming the same leading kind.
   (define (check-no-duplicates! pairs table-name sort-name)
-    (let loop ([seen '()] [pairs pairs])
-      (unless (null? pairs)
-        (define k (caar pairs))
-        (when (memf (λ (s) (eq? (syntax-e s) (syntax-e k))) seen)
-          (raise-syntax-error 'define-operator-grammar
-                              (format "duplicate ~a entry for kind ~a in sort ~a"
-                                      table-name (syntax-e k) (syntax-e sort-name))
-                              k))
-        (loop (cons k seen) (cdr pairs)))))
+    (define dupe (check-duplicates pairs free-identifier=?))
+    (when dupe
+      (raise-syntax-error 'define-operator-grammar
+                          (format "duplicate ~a entry for kind ~a in sort ~a"
+                                  table-name (syntax-e dupe) (syntax-e sort-name))
+                          dupe)))
 
   (define (compile-sort sort-stx)
     (syntax-parse sort-stx
@@ -534,3 +531,4 @@
     ;; if this were still ms-expr's table, 1+2 wouldn't parse as binop at
     ;; all (ms-expr has no infix + declared in this fixture).
     (check-eq? (green-tree-kind rhs) 'binop)))
+ 
