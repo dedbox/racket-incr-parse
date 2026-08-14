@@ -111,9 +111,16 @@
   (define (assoc->rbp lbp assoc)
     (case assoc
       [(left)  (add1 lbp)]   ; rbp > lbp: the same operator won't re-trigger
-      [(right) (sub1 lbp)]   ;   while parsing its own right operand -
-      [(none)  lbp]))        ;   rbp = lbp: it can't re-trigger AT ALL,
-                              ;   i.e. genuinely non-associative.
+      [(right) (sub1 lbp)]   ;   while parsing its own right operand.
+      [(none)  lbp]))        ; rbp = lbp: the marker core/pratt.rkt's
+                              ;   parse-led specifically checks for and
+                              ;   acts on - by itself, an equal rbp/lbp
+                              ;   pair does NOT block anything (an early
+                              ;   version of this file believed it did;
+                              ;   it doesn't - see parse-led's own comment
+                              ;   for why the outer climbing loop, not the
+                              ;   bp pair alone, is what has to enforce
+                              ;   non-associativity).
 
   ;;; ------------------------------------------------------------------------
   ;;; Compile-time: slot templates
@@ -200,6 +207,21 @@
       ;; its CST to distinguish e.g. variables from literals by tag alone
       ;; (hazelnut.rkt's Ident -> 'var, Number -> 'num, True/False -> 'bool).
       ;; The two forms freely mix within one atom declaration.
+      ;;
+      ;; Justification, since this buys nothing for elaborate.rkt: its
+      ;; built-in green-token case always reads the LEXER token's own kind
+      ;; (lex:token-kind), never this grammar-level tag, so elaboration
+      ;; behaves identically either way - confirmed by reading
+      ;; elaborate/dispatch itself, not assumed. The real, narrower reason
+      ;; to use per-kind tags is CST/Red-tree tooling parity: every other
+      ;; declaration here (form, a named infix/prefix/postfix) already
+      ;; gets to choose its own green-tree-kind; without this, atoms alone
+      ;; would be the one leaf shape that can't, forcing anything doing
+      ;; kind-based navigation (red-enclosing-of-kind, a "find all numeric
+      ;; literals" editor command, debug-printing) to special-case leaves -
+      ;; dig into the wrapped token's own kind instead of just comparing
+      ;; green-tree-kind like it does for every branch. Costs nothing when
+      ;; unused (bare Kind still defaults to 'atom).
       [(atom atom-clause ...)
        #:do [(define pairs
                (for/list ([ac (in-list (attribute atom-clause))])
@@ -297,9 +319,15 @@
              (define kind-name (if (attribute name) #`(quote #,(attribute name)) #''unop))
              (define left-id (generate-temporary 'left))
              (define toks0 (generate-temporary 'toks))
-             ;; No slot here is ever a `_`, so the trailing-bp argument is
-             ;; never actually read - passed as lbp only so the (lbp . rbp)
-             ;; pair's rbp still has a defined, harmless value.
+             ;; No slot here is ever a `_`, so rbp is never actually read to
+             ;; bound a parse - postfix has no right-hand operand. It must
+             ;; still be a DIFFERENT value from lbp, though: core/pratt.rkt's
+             ;; parse-led now treats left-bp = right-bp as the genuine-non-
+             ;; associativity marker (see infixl/infixr/infix above), and a
+             ;; postfix entry accidentally matching that shape would make
+             ;; every postfix application block whatever operator follows it
+             ;; - `add1` just needs to break the coincidence, not encode any
+             ;; real meaning of its own.
              (define-values (vals clauses final-toks)
                (compile-slots rest-slots sort-name toks0 lbp))]
        (values '()
@@ -307,7 +335,7 @@
                           #`(λ (#,left-id #,toks0)
                               (let*-values (#,@clauses)
                                 (values (intern-branch! #,kind-name (list #,left-id #,@vals)) #,final-toks)))))
-               (list (cons dispatch-kind #`(cons #,lbp #,lbp))))]))
+               (list (cons dispatch-kind #`(cons #,lbp (add1 #,lbp)))))]))
 
   ;;; ------------------------------------------------------------------------
   ;;; Compile-time: one whole sort -> its three tables + parse-<sort>
@@ -415,14 +443,19 @@
   ;; A slice of arith.rkt's own shape, plus a right-assoc Caret neither
   ;; example grammar exercises, specifically to check infixr's derived bp
   ;; against infixl's, by hand-verifiable example (not just by inspection).
+  ;; Tilde and Bang exist specifically to test `infix` (genuine non-
+  ;; associativity) and `postfix` end to end - see the tests below for why
+  ;; both needed a real fix in core/pratt.rkt, not just this file.
   (define-operator-grammar ar
     #:lexer (λ (x) x) #:apply-edit (λ (x . _) x) ; unused by these tests
     #:entry expr
     (sort expr
       (atom Number)
       (infixl 1 (_ 'Plus _))
+      (infix  1 (_ 'Tilde _))
       (infixl 2 (_ 'Star _))
       (infixr 3 (_ 'Caret _))
+      (postfix 4 (_ 'Bang))
       (form paren 'LParen _ 'RParen)))
 
   (test-case "infixl: left-associativity, 1+2+3 groups as (1+2)+3"
@@ -445,6 +478,46 @@
     (define-values (l op r) (apply values (green-branch-children tree)))
     (check-eq? (green-tree-kind l) 'atom)
     (check-eq? (green-tree-kind r) 'binop))
+
+  (test-case "postfix: still chains with a FOLLOWING operator (regression check for the parse-led non-associativity fix below)"
+    (define-values (tree rest)
+      (parse-expr (toks 'Number "5" 'Bang "!" 'Plus "+" 'Number "1") 0))
+    (check-eq? (green-tree-kind tree) 'binop)
+    (define-values (l op r) (apply values (green-branch-children tree)))
+    (check-eq? (green-tree-kind l) 'unop)
+    (check-eq? (green-tree-kind r) 'atom)
+    (check-eq? (peek-kind rest) 'incr-lex:eof))
+
+  (test-case "infix (genuinely non-associative): 1~2~3 combines only 1~2, leaving ~3 unconsumed"
+    (define-values (tree rest)
+      (parse-expr (toks 'Number "1" 'Tilde "~" 'Number "2" 'Tilde "~" 'Number "3") 0))
+    (check-eq? (green-tree-kind tree) 'binop)
+    (define-values (l op r) (apply values (green-branch-children tree)))
+    (check-eq? (green-tree-kind l) 'atom)
+    (check-eq? (green-tree-kind r) 'atom)
+    ;; the second ~ was never consumed - this is the actual proof rbp=lbp
+    ;; blocks the OUTER loop, not just the inner right-hand parse (which
+    ;; a two-operand test alone can never distinguish from ordinary
+    ;; left-associativity - see core/pratt.rkt's parse-led for why).
+    (check-eq? (peek-kind rest) 'Tilde))
+
+  (test-case "infix (non-associative) also blocks a DIFFERENT same-tier operator immediately after, not just itself"
+    (define-values (tree rest)
+      (parse-expr (toks 'Number "1" 'Tilde "~" 'Number "2" 'Plus "+" 'Number "3") 0))
+    (check-eq? (green-tree-kind tree) 'binop)
+    (check-eq? (peek-kind rest) 'Plus))
+
+  (test-case "infix (non-associative) does NOT block continuation when a same-tier associative operator fires FIRST"
+    (define-values (tree rest)
+      (parse-expr (toks 'Number "1" 'Plus "+" 'Number "2" 'Tilde "~" 'Number "3") 0))
+    ;; (1+2)~3 - the ~ DOES get to fire here, since + firing first never
+    ;; bumps the loop's floor; only ~ firing does. The blocking is a
+    ;; property of the operator that just applied, not of the tier as a
+    ;; whole.
+    (check-eq? (green-tree-kind tree) 'binop)
+    (define-values (l op r) (apply values (green-branch-children tree)))
+    (check-eq? (green-tree-kind l) 'binop)
+    (check-eq? (peek-kind rest) 'incr-lex:eof))
 
   (test-case "form: paren consumes both delimiters, missing close still recovers as a ghost"
     (define-values (t1 _r1)

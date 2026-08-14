@@ -98,12 +98,34 @@
 ;;
 ;; bp levels only need to preserve relative looseness/tightness within each
 ;; sort - loosest to tightest in Expr: ternary(1) < comparison(2) <
-;; additive(3) < multiplicative(4) < application(5). Comparison is
-;; deliberately `infixl`, not the genuinely-non-associative `infix` - a < b
-;; < c parses as (a < b) < c, matching this grammar's original hand-picked
-;; bp values (CMP-RBP = CMP-LBP + 1) exactly; unusual for comparison
-;; operators in most languages, but that's what this grammar already did,
-;; and porting it should not silently change behavior.
+;; additive(3) < multiplicative(4) < application(5). Lt (<) is deliberately
+;; `infixl`, not the genuinely-non-associative `infix` - a < b < c parses
+;; as (a < b) < c, matching this grammar's original hand-picked bp values
+;; (CMP-RBP = CMP-LBP + 1) exactly; unusual for a comparison operator in
+;; most languages, but that's what this grammar already did, and porting
+;; it should not silently change behavior.
+;;
+;; EXCEPT for one deliberate deviation: the original also gave EqEq (≡)
+;; this same left-associative-chaining shape, purely as an artifact of
+;; copying Lt's bp values rather than as an intentional design choice -
+;; the formal Hazelnut calculus this grammar is a surface syntax for
+;; doesn't specify chained-comparison semantics at all, so there was no
+;; "correct" behavior being preserved there, only an accident. Kept here
+;; as a deliberate illustration instead: Lt (<) stays `infixl`, so
+;; `a < b < c` still parses as `(a < b) < c` - a real chained-comparison
+;; language (Python, for instance) would want something structurally
+;; different (a < b < c meaning (a < b) and (b < c), which needs its own,
+;; separate grammar rule, not just an associativity choice - not what
+;; this deviation is illustrating). EqEq (≡) is instead genuinely
+;; non-associative via `infix`: `a ≡ b ≡ c` is now a real parse boundary,
+;; not silently accepted. This is the one place in this whole codebase
+;; `infix` (as opposed to `infixl`/`infixr`) is exercised on a real
+;; example grammar rather than only core/operator-grammar.rkt's own
+;; isolated tests - see those tests, and core/pratt.rkt's parse-led, for
+;; why genuine non-associativity needed a real engine fix, not just a
+;; bp-table entry (an equal left-bp/right-bp pair alone was NOT enough to
+;; block a repeated operator - the outer climbing loop had to be taught
+;; to look for that marker too).
 ;;
 ;; fun/let read close to their own BNF-comment shape (λ Ident : Type .
 ;; Expr / let Ident = Expr in Expr) as `form`s - `(: type)` is what makes
@@ -127,7 +149,7 @@
     (infixl 4 (_ 'Star _))
     (infixl 4 (_ 'Slash _))
     (infixl 2 (_ 'Lt _))
-    (infixl 2 (_ 'EqEq _))
+    (infix  2 (_ 'EqEq _))
     (infixr 1 ternary (_ 'Question _ 'Colon _))
     (infixl 5 (_ _) #:over (Ident Number True False LParen)))
   (sort type
@@ -260,6 +282,27 @@
     (check-eq? (green-tree-kind test) 'binop)
     (check-eq? (green-tree-kind then) 'num)
     (check-eq? (green-tree-kind else) 'ternary))
+
+  (test-case "Lt chains (illustrative, matches the original's own bp values); EqEq does not (genuinely non-associative)"
+    ;; a < b < c: still combines fully - the deliberate deviation this
+    ;; file's own header explains.
+    (define lt-tree (parse-hazelnut-string "1 < 2 < 3"))
+    (check-eq? (green-tree-kind lt-tree) 'binop)
+    (define-values (lt-l _lt-op lt-r) (apply values (green-branch-children lt-tree)))
+    (check-eq? (green-tree-kind lt-l) 'binop)
+    (check-eq? (green-tree-kind lt-r) 'num)
+    ;; a ≡ b ≡ c: only a ≡ b combines. Calling parse-expr directly, not
+    ;; parse-hazelnut-string/document-parse! - this file's entry point is
+    ;; a bare Expr, not wrapped in a consume-to-EOF loop, so the second
+    ;; ≡ being left unconsumed needs to be checked directly against
+    ;; parse-expr's own return value, not inferred from a round-trip.
+    (define doc (make-document hazelnut-grammar "𝕥 ≡ 𝕗 ≡ 𝕥"))
+    (define-values (eq-tree rest) (parse-expr (tokens->stream (document-tokens doc)) 0))
+    (check-eq? (green-tree-kind eq-tree) 'binop)
+    (define-values (eq-l _eq-op eq-r) (apply values (green-branch-children eq-tree)))
+    (check-eq? (green-tree-kind eq-l) 'bool)
+    (check-eq? (green-tree-kind eq-r) 'bool)
+    (check-eq? (peek-kind rest) 'EqEq))
 
   (test-case "AST: sort transition is visible in the elaborated tree too"
     (define ast (elaborate-hazelnut-string "λx:ℕ→𝔹.𝕥"))

@@ -82,7 +82,22 @@
     [(and bp (> (car bp) min-bp))
      (define led (hash-ref (current-led-table) kind))
      (define-values (combined toks*) (led left toks))
-     (parse-led combined toks* min-bp)]
+     ;; A genuinely non-associative operator (right-bp = left-bp) needs
+     ;; more than just its own right-hand parse refusing to re-trigger
+     ;; itself (see led-infix - that part already works via right-bp
+     ;; alone). This OUTER loop must also refuse to re-trigger ANY
+     ;; same-or-looser-tier operator immediately afterward, or `a op b`
+     ;; simply becomes the new `left` and the loop chains it with
+     ;; whatever comes next anyway - which is exactly how left-
+     ;; associativity happens in the first place (a+b+c only combines at
+     ;; all because this loop keeps re-checking the CALLER's original
+     ;; min-bp on every iteration, ignoring right-bp entirely). So this
+     ;; bump is conditional: it only fires when the operator that just
+     ;; applied was itself non-associative, leaving ordinary
+     ;; left-associative chaining (right-bp > left-bp) completely
+     ;; unaffected.
+     (define next-min-bp (if (= (car bp) (cdr bp)) (max min-bp (car bp)) min-bp))
+     (parse-led combined toks* next-min-bp)]
     [else (values left toks)]))
 
 ;;; --------------------------------------------------------------------------
